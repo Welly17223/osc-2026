@@ -1,0 +1,5 @@
+target/
+*.fit
+qemu.*
+*.bin
+utils/write_kernel

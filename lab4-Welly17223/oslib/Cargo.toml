@@ -1,0 +1,17 @@
+[package]
+name = "oslib"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+log = { workspace = true }
+spin = { workspace = true }
+riscv = { workspace = true }
+
+[features]
+default = ["qemu"]
+qemu = []
+orangePI = []
+
+[build-dependencies]
+cc = "1.0"

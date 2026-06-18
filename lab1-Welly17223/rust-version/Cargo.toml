@@ -1,0 +1,21 @@
+[package]
+name = "rust-version"
+version = "0.1.0"
+edition = "2024"
+
+[features]
+default = ["qemu"]
+qemu = []
+orangePI = []
+
+[dependencies]
+panic-halt = "1.0.0"
+
+[build-dependencies]
+cc = "1.0"
+
+[profile.dev]
+panic = "abort"
+
+[profile.release]
+panic = "abort"

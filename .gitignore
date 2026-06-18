@@ -1,0 +1,5 @@
+.cache
+*.fit
+*.o
+*.bin
+*.elf

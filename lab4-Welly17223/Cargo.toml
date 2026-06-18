@@ -1,0 +1,35 @@
+[package]
+name = "os"
+version = "0.1.0"
+edition = "2024"
+
+[features]
+default = ["qemu"]
+qemu = []
+orangePI = []
+
+[workspace]
+members = ["bootloader", "c_test", "memory_alloc", "oslib"]
+
+[dependencies]
+panic-halt = "1.0.0"
+oslib = { version="0.1.0", path = "oslib" }
+memory_alloc = { version="0.1.0", path = "memory_alloc" }
+log = { workspace = true }
+spin = { workspace = true }
+c_test = { version = "0.1.0", path = "c_test" }
+riscv = { workspace = true }
+
+[workspace.dependencies]
+log = "0.4.0"
+spin = "0.9"
+riscv = { version="0.16.0", features = ["s-mode"] }
+
+[build-dependencies]
+cc = "1.0"
+
+[profile.dev]
+panic = "abort"
+
+[profile.release]
+panic = "abort"

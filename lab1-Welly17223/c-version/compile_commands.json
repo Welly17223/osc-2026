@@ -1,0 +1,41 @@
+[
+  {
+    "file": "start.S",
+    "arguments": [
+      "riscv64-elf-gcc",
+      "-mcmodel=medany",
+      "-ffreestanding",
+      "-g",
+      "-Wall",
+      "-c",
+      "start.S"
+    ],
+    "directory": "/home/welly/Documents/3Grade/OSDI/OSDI/lab1"
+  },
+  {
+    "file": "main.c",
+    "arguments": [
+      "riscv64-elf-gcc",
+      "-mcmodel=medany",
+      "-ffreestanding",
+      "-g",
+      "-Wall",
+      "-c",
+      "main.c"
+    ],
+    "directory": "/home/welly/Documents/3Grade/OSDI/OSDI/lab1"
+  },
+  {
+    "file": "uart.c",
+    "arguments": [
+      "riscv64-elf-gcc",
+      "-mcmodel=medany",
+      "-ffreestanding",
+      "-g",
+      "-Wall",
+      "-c",
+      "uart.c"
+    ],
+    "directory": "/home/welly/Documents/3Grade/OSDI/OSDI/lab1"
+  }
+]

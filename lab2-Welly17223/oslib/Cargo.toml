@@ -1,0 +1,14 @@
+[package]
+name = "oslib"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+
+[features]
+default = ["qemu"]
+qemu = []
+orangePI = []
+
+[build-dependencies]
+cc = "1.0"

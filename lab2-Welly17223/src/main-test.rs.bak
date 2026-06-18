@@ -1,0 +1,72 @@
+#![no_std]
+#![no_main]
+
+use core::arch::asm;
+use core::{arch::global_asm, panic::PanicInfo};
+use oslib::uart::Uart;
+use oslib::{platform, sbi};
+
+extern crate panic_halt;
+
+global_asm!(include_str!("start.s"));
+
+#[cfg(all(feature = "qemu", feature = "orangePI"))]
+compile_error!(
+    "Features `qemu` and `orangePI` are mutually exclusive and cannot be enabled together."
+);
+
+#[cfg(not(any(feature = "qemu", feature = "orangePI")))]
+compile_error!("You must specify a target platform feature: `qemu` or `orangePI`.");
+
+enum Key {
+    Up,
+    Down,
+    Clear,
+}
+
+impl Key {
+    pub fn to_str(&self) -> &'static str {
+        match self {
+            Self::Up => "\x1b[A",
+            Self::Down => "\x1b[B",
+            Self::Clear => "\x1b[2K",
+        }
+    }
+}
+
+#[allow(static_mut_refs)]
+#[unsafe(no_mangle)]
+pub extern "C" fn main(_heart_id: u64, _dtb_addr: u64) {
+    // TODO: Load dtb uart and ramdisk address
+
+    let def_uart = Uart::new(platform::UART_BASE as usize, platform::UART_LSR as usize);
+    def_uart.puts("112550172's kernel starting...\n");
+
+    loop {
+        unsafe {
+            asm!("wfi");
+        }
+    }
+}
+
+/* #[panic_handler]
+fn panic(info: &PanicInfo) -> ! {
+    let def_uart = Uart::new(platform::UART_BASE as usize, platform::UART_LSR as usize);
+    def_uart.puts("Something went wrong!\n");
+
+    if let Some(message) = info.message().as_str() {
+        def_uart.puts(message);
+    } else {
+        def_uart.puts("No error message\n");
+    }
+
+    if let Some(locatioin) = info.location() {
+        def_uart.puts(locatioin.file());
+        def_uart.puts(" ");
+        def_uart.put_hex(locatioin.line() as u64);
+        def_uart.puts("\n");
+    } else {
+        def_uart.puts("No location message\n");
+    }
+    loop {}
+} */

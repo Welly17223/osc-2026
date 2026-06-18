@@ -1,0 +1,33 @@
+/dts-v1/;
+/ {
+    description = "U-boot FIT Image for Orange Pi RV2";
+    #address-cells = <2>;
+    images {
+        kernel {
+            description = "Kernel Image";
+            data = /incbin/("kernel.bin");
+            type = "kernel";
+            arch = "riscv";
+            os = "linux";
+            compression = "none";
+            load = <0x0 0x00200000>;
+            entry = <0x0 0x00200000>;
+        };
+        fdt {
+            description = "Flat Device Tree";
+            data = /incbin/("x1_orangepi-rv2.dtb");
+            type = "flat_dt";
+            arch = "riscv";
+            compression = "none";
+            load = <0x0 0x31000000>;
+        };
+    };
+    configurations {
+        default = "config-1";
+        config-1 {
+            description = "NYCU OSC RISC-V KERNEL";
+            kernel = "kernel";
+            fdt = "fdt";
+        };
+    };
+};

@@ -1,0 +1,342 @@
+extern crate alloc;
+use alloc::{boxed::Box, string::String, vec::Vec};
+
+use core::fmt::Write;
+
+use crate::{
+    fdt::{self, DTB_ADDR},
+    interrupt::{
+        self,
+        timer::{self, get_time_raw},
+    },
+    ramdisk::{self, CatError, Cpio, INITRD_START},
+    sbi,
+    schedule::{self, current_tcb},
+    thread::{self, ThreadControlTable},
+    uart::{self, SERIAL},
+};
+
+struct TimerArgs {
+    sec: u32,
+    message: String,
+}
+
+fn timer_func(args: *const u8) {
+    let args = unsafe { &*(args as *const TimerArgs) };
+    let _disable_interrupt = interrupt::SModeInterrupt::new();
+    let serial_ptr = &raw mut SERIAL;
+    let Some(serial) = (unsafe { &mut *serial_ptr }) else {
+        return;
+    };
+
+    writeln!(
+        serial,
+        "[time interrupt]: {} call at {} message: {}",
+        timer::get_time_raw() / timer::get_sec(),
+        args.sec,
+        args.message
+    )
+    .unwrap();
+}
+
+extern "C" fn task_func(args: *const u8) {
+    let serial_ptr = &raw mut uart::SERIAL;
+    let Some(serial) = (unsafe { &mut *serial_ptr }) else {
+        return;
+    };
+    let args: u32 = unsafe { *(args as *const u32) };
+    let next_time = timer::offset_sec(args as u64);
+    while timer::get_time_raw() < next_time {}
+
+    let _disable_interrupt = interrupt::SModeInterrupt::default();
+    writeln!(serial, "[task] run {} loops", args).unwrap();
+}
+
+pub fn control_input() {
+    loop {
+        let serial_ptr = &raw mut SERIAL;
+        let Some(serial) = (unsafe { &mut *serial_ptr }) else {
+            panic!("not initilized");
+        };
+        let linux_initrd_start = unsafe { INITRD_START } as *const Cpio;
+
+        let mut buf = Vec::new();
+        write!(serial, "> ").unwrap();
+        loop {
+            let ch = serial.pop_rx();
+
+            match ch {
+                b'\r' | b'\n' => {
+                    serial.push_tx("\n");
+                    break;
+                }
+                0x7f | 0x08 => {
+                    if buf.pop().is_some() {
+                        serial.push_tx("\x08 \x08");
+                    }
+                }
+                _ => {
+                    buf.push(ch);
+                    write!(serial, "{}", ch as char).unwrap();
+                }
+            }
+        }
+
+        let buf = match String::from_utf8(buf) {
+            Ok(s) => s,
+            Err(e) => {
+                writeln!(serial, "{e:?}").unwrap();
+                continue;
+            }
+        };
+        let cmds: alloc::vec::Vec<_> = buf.split_ascii_whitespace().collect();
+        let n_args = cmds.len();
+        if cmds.is_empty() {
+            continue;
+        }
+
+        let _disable_interrupt = interrupt::SModeInterrupt::new();
+        match cmds[0] {
+            "help" => {
+                writeln!(serial, "Avaliable commands:").unwrap();
+                writeln!(serial, "    {:8} - print help message.", "help").unwrap();
+                writeln!(serial, "    {:8} - print Hello world.", "hello").unwrap();
+                writeln!(serial, "    {:8} - print system info.", "info").unwrap();
+                writeln!(serial, "    {:8} - list file in file system.", "ls").unwrap();
+                writeln!(serial, "    {:8} - cat file in file system.", "cat").unwrap();
+                writeln!(
+                    serial,
+                    "    {:8} - set oneshot timer, and print message.",
+                    "settimer"
+                )
+                .unwrap();
+            }
+            "hello" => {
+                writeln!(serial, "Hello world!").unwrap();
+            }
+            "info" => {
+                writeln!(serial, "System information:").unwrap();
+                writeln!(
+                    serial,
+                    "  OpenSBI specification version: 0x{:x}",
+                    sbi::get_spec_version()
+                )
+                .unwrap();
+                writeln!(serial, "  Implementation ID: 0x{:x}", sbi::get_impl_id()).unwrap();
+                writeln!(
+                    serial,
+                    "  Implementation version: 0x{:x}",
+                    sbi::get_impl_version()
+                )
+                .unwrap();
+            }
+            // "exit" => break 'main_loop,
+            "ls" => {
+                ramdisk::list(linux_initrd_start).unwrap();
+            }
+            "dump" => {
+                let dtb_addr = unsafe { DTB_ADDR } as *const u8;
+                writeln!(serial).unwrap();
+                fdt::dump_tree(dtb_addr);
+            }
+            "cat" if n_args > 1 => {
+                if let Err(CatError::FileNotFound) = ramdisk::cat(linux_initrd_start, cmds[1]) {
+                    writeln!(serial, "File '{}' not fmound", cmds[1]).unwrap();
+                }
+            }
+            "addtask" => {
+                if cmds.len() < 3 {
+                    writeln!(serial, "usage: {} [num] [priority]", cmds[0]).unwrap();
+                    continue;
+                }
+
+                let num: u32 = match cmds[1].parse() {
+                    Ok(n) => n,
+                    Err(e) => {
+                        writeln!(serial, "parse num error: {e:?}").unwrap();
+                        continue;
+                    }
+                };
+
+                let priority: u32 = match cmds[2].parse() {
+                    Ok(n) => n,
+                    Err(e) => {
+                        writeln!(serial, "parse num error: {e:?}").unwrap();
+                        continue;
+                    }
+                };
+
+                interrupt::add_task(task_func, Box::new(num), priority);
+            }
+            "curr" => {
+                let curr_task_ptr = &raw const interrupt::CURRENT_TASK;
+                let queue_ptr = &raw const interrupt::TASK_QUEUE;
+                let Some(curr_task) = (unsafe { &*curr_task_ptr }) else {
+                    continue;
+                };
+                let Some(queue) = (unsafe { &*queue_ptr }) else {
+                    continue;
+                };
+                let peek = queue.peek();
+                writeln!(
+                    serial,
+                    "current task: id {}, priority {}",
+                    curr_task.id(),
+                    curr_task.priority(),
+                )
+                .unwrap();
+                if let Some(peek) = peek {
+                    writeln!(
+                        serial,
+                        "peek task: id {}, priority {}",
+                        peek.id(),
+                        peek.priority(),
+                    )
+                    .unwrap();
+                } else {
+                    writeln!(serial, "queue is empty").unwrap();
+                }
+            }
+            "sepc" => {
+                writeln!(serial, "sepc: {:#x}", riscv::register::sepc::read()).unwrap();
+            }
+            "exec" => {
+                if cmds.len() < 2 {
+                    writeln!(serial, "usage: {} [file name]", cmds[0]).unwrap();
+                    continue;
+                }
+
+                if let Ok(file) = ramdisk::find(linux_initrd_start, cmds[1]) {
+                    let _disable_interrupt = interrupt::SModeInterrupt::new();
+                    const THREAD_STACK_SIZE: usize = 0x10000;
+
+                    let cap = crate::align(file.len() + THREAD_STACK_SIZE, 0x10);
+                    let mut program = Vec::with_capacity(cap);
+                    file.iter().for_each(|b| program.push(*b));
+
+                    for _i in program.len()..cap {
+                        program.push(0);
+                    }
+
+                    let mut prog_regs = interrupt::pt_regs::default();
+                    let program_start = program.as_ptr();
+
+                    prog_regs.sepc = program_start as usize;
+                    // spie
+                    prog_regs.sstatus = riscv::register::sstatus::read().bits();
+                    prog_regs.sstatus |= 1 << 5;
+                    // spp
+                    prog_regs.sstatus &= !(1 << 8);
+                    writeln!(
+                        serial,
+                        "will exec: {} at {:#x}, {:#p}",
+                        cmds[1],
+                        prog_regs.sepc,
+                        program.as_ptr(),
+                    )
+                    .unwrap();
+
+                    let current_pid = current_tcb().pid;
+                    let proc = thread::ThreadControlTable::from_stack(
+                        program,
+                        prog_regs.sepc as _,
+                        current_pid,
+                    );
+                    let pid = ThreadControlTable::create_thread(proc);
+
+                    /* let pid = thread::ThreadControlTable::create(
+                        prog_regs.sepc as _,
+                        current_pid,
+                        prog_regs.sstatus,
+                    ); */
+
+                    let exit_code = schedule::kwait_pid(pid);
+                    writeln!(serial, "pid: {pid} exit code: {exit_code}").unwrap();
+                } else {
+                    writeln!(serial, "file {} not found", cmds[1]).unwrap();
+                }
+            }
+            "sstate" => {
+                writeln!(serial, "sstate: {}", interrupt::s_mode_interrupt_status()).unwrap();
+            }
+            "settimer" => {
+                if cmds.len() < 4 {
+                    writeln!(serial, "usage: {} [sec] [is_repeat(0/1)] [msg]", cmds[0]).unwrap();
+                    continue;
+                }
+
+                let sec: u64 = match cmds[1].parse() {
+                    Ok(n) => n,
+                    Err(e) => {
+                        writeln!(serial, "parse sec error: {:?}", e).unwrap();
+                        continue;
+                    }
+                };
+                let is_repeat: bool = match cmds[2].parse::<u8>() {
+                    Ok(1u8) => true,
+                    Ok(0u8) => false,
+                    Ok(n) => {
+                        writeln!(serial, "only accept 0 and 1, found {n}").unwrap();
+                        continue;
+                    }
+                    Err(e) => {
+                        writeln!(serial, "parse repeat error: {:?}", e).unwrap();
+                        continue;
+                    }
+                };
+
+                let message = cmds[3..].join(" ");
+                let t1 = Box::new(TimerArgs {
+                    sec: (get_time_raw() / timer::get_sec()) as u32,
+                    message,
+                });
+                timer::add_timer(
+                    timer::Time::new(sec, timer::TimeUnit::Sec),
+                    timer_func,
+                    Some(t1),
+                    is_repeat,
+                );
+            }
+            "setTimeout" => {
+                if cmds.len() < 3 {
+                    writeln!(serial, "usage: {} [sec] [is_repeat(0/1)] [msg]", cmds[0]).unwrap();
+                    continue;
+                }
+
+                let sec: u64 = match cmds[1].parse() {
+                    Ok(n) => n,
+                    Err(e) => {
+                        writeln!(serial, "parse sec error: {:?}", e).unwrap();
+                        continue;
+                    }
+                };
+
+                let message = cmds[2..].join(" ");
+                let t1 = Box::new(TimerArgs {
+                    sec: (get_time_raw() / timer::get_sec()) as u32,
+                    message,
+                });
+                timer::add_timer(
+                    timer::Time::new(sec, timer::TimeUnit::Sec),
+                    timer_func,
+                    Some(t1),
+                    false,
+                );
+            }
+            "time" => {
+                writeln!(
+                    serial,
+                    "current time: {}, freq: {}, timmer interrupt: {}, timmer sip: {}",
+                    timer::get_time_raw(),
+                    timer::get_sec(),
+                    riscv::register::sie::read().stimer(),
+                    riscv::register::sip::read().stimer()
+                )
+                .unwrap();
+            }
+            _ => {
+                writeln!(serial, "Invalid command '{}'", cmds[0]).unwrap();
+            }
+        }
+    }
+}

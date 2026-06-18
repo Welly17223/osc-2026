@@ -1,0 +1,10 @@
+[package]
+name = "memory_alloc"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+oslib = { path="../oslib", version = "0.1.0" }
+log = { workspace = true }
+spin = { workspace = true }
+riscv = { workspace = true }

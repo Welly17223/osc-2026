@@ -1,0 +1,25 @@
+[package]
+name = "os"
+version = "0.1.0"
+edition = "2024"
+
+[features]
+default = ["qemu"]
+qemu = []
+orangePI = []
+
+[workspace]
+members = ["bootloader", "oslib"]
+
+[dependencies]
+panic-halt = "1.0.0"
+oslib = { version="0.1.0", path = "oslib" }
+
+[build-dependencies]
+cc = "1.0"
+
+[profile.dev]
+panic = "abort"
+
+[profile.release]
+panic = "abort"
