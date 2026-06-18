@@ -1,6 +1,6 @@
-# 課程簡介
+# 2026 陽明交通大學資工系 Operator System Capstone 課程簡介
 
-## 2026 陽明交通大學資工系 Operator System Capstone 相關網站
+## 相關網站
 課程網站：[OSC](https://people.cs.nycu.edu.tw/~ttyeh/course/2026_Spring/IOC5226/outline.html)
 
 作業網站：[作業](https://nycu-caslab.github.io/OSC2026/class/staff.html)
