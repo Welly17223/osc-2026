@@ -1,5 +1,5 @@
 # Lab 1
-[作業聯結](https://nycu-caslab.github.io/OSC2026/labs/lab1.html)
+[作業連結](https://nycu-caslab.github.io/OSC2026/labs/lab1.html)
 [Exercise](https://reurl.cc/dq6992)
 
 ## Rust 環境建立
@@ -126,3 +126,7 @@ pub unsafe extern "C" fn sbi_ecall(
 
 解析：Rust 的 naked function 可以當成 inline 組語看待，其中重要的差別是，在執行時因為是 function call ，所以編譯器會先儲存 caller saved register 並且在回傳時自動恢復；在這個 function 裡面只能寫組合語言，並且如果要使用 callee saved register 要手動儲存、自己寫 `ret` 基本上就跟寫組合語言是一模一樣的 。函數在這個函數裡，傳入的參數會依順序存在 `a0`~`a7` ，因此可以直接呼叫 `ecall`；呼叫 `ecall` 之後，會進入 M Mode ，並且 Open SBI 會讀取 `fid`、`ext` ，來決定要執行嗯什麼程式，最後將回傳的 error 寫入 `a0`、 value 寫入 `a1`，而 C 語言在回傳一個 struct 時，若是 struct 小於兩個變數，會將兩個變數寫入 `a0` 跟 `a1`；由於這個 function 標注了 `extern "C"`，因此 Rust 會以 C 語言的標準去處理這個 function。
 
+# 心得
+最簡單的作業沒有之一，感覺把 exercise 做完就差不多了；不過一開始因為嘗試 Rust 寫所以在環境設定時另外參考了很多網路上的文章跟嵌入式開發的內容，使用 Rust 寫這個作業絕對不會比較輕鬆，因為 Rust 對於所有權、Sync/Send 跟可變引用的嚴格要求，你在設計上就會需要想辦法通過編譯器的檢查；相對的優點也很明顯：更現代化的語法、自帶 Link List、String、BTree Map 等資料結構、對於記憶體管理的嚴謹性會讓開發上少去很多對應的 Bug。
+
+光是 Lab 1 的筆記就這麼多了，感覺距離寫完整個系列真的搖搖無期。
