@@ -5,8 +5,8 @@ pub const LSR_DR: u8 = 1 << 0;
 pub const LSR_TDRQ: u8 = 1 << 5;
 
 pub fn getc() -> u64 {
-    while unsafe { *UART_LSR } & LSR_DR == 0 {}
-    let ch: u64 = unsafe { *UART_RBR } as u64;
+    while unsafe { UART_LSR.read_volatile() } & LSR_DR == 0 {}
+    let ch: u64 = unsafe { UART_RBR.read_volatile() } as u64;
     if ch == '\r' as u64 { '\n' as u64 } else { ch }
 }
 
@@ -14,8 +14,8 @@ pub fn putc(ch: u8) {
     if ch == b'\n' {
         putc(b'\r');
     }
-    while unsafe { *UART_LSR } & LSR_TDRQ == 0 {}
-    unsafe { *UART_THR = ch };
+    while unsafe { UART_LSR.read_volatile() } & LSR_TDRQ == 0 {}
+    unsafe { UART_THR.write_volatile(ch) };
 }
 
 pub fn puts(string: &str) {
