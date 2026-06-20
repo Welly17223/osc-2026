@@ -22,7 +22,7 @@ fn panic(_panic: &PanicInfo<'_>) -> ! {
 ```
 5. 除錯：在 `qemu` 虛擬機執行時加上 `-S -s` 這兩個參數，並且在 `rust-gdb` 或是 `rust-lldb` 裡面用 `target remote:1234` 連結並且除錯。
 6. 在除錯時可以以 `debug` 模式編譯，缺點是程式體積較大並且速度較慢（有點類似 c 的 `-O1`，編譯器只會對變數做最保守的推測），在確定沒問題時再用 `--release` ，讓程式在執行時速度變快。
-   Rust 的 release 模式有一些小坑，如果在使用某些需要 volatile 的變數時沒有正確使用 `read_volatile`、`write_volatile` 會導致編譯器無法編譯出正確的程式碼，然後跑不起來。雖然 C 也會有一樣的問題，但是如果使用 rust 的 debug 模式時似乎不會對變數記憶體存取上做過多的推測，導致行為正常，但是一使用 release 模式就出事了，因此正確使用 volatile 是很重要的。可以參考[這篇文章](https://zhuanlan.zhihu.com/p/343688629)來了解 C 裡面 volatile 的用法，基本上 Rust 也適用。
+   Rust 的 release 模式有一些小坑，如果在使用某些需要 volatile 的變數時沒有正確使用 `read_volatile`、`write_volatile` 會導致編譯器無法編譯出正確的程式碼，然後跑不起來。雖然 C 也會有一樣的問題，但是如果使用 rust 的 debug 模式時似乎不會對變數記憶體存取上做過多的推測，導致行為正常，但是一使用 release 模式就出事了，因此正確使用 volatile 是很重要的。
 7. 撰寫 `build.rs` 讓 rust 編譯器使用我們自己寫的 linker file 以及將 `start.s` 也編譯進去（不過這裡好像是用 `global_asm!(include_str!("start.s"));
 `）把 `start.s` 包含進編譯的 text 裡面就是了。差別是使用 rust build dependency `cc` 在 debug 時可以比較方便看到組合語言。 
 `build.rs`：
@@ -52,8 +52,13 @@ panic = "abort"
 panic = "abort"
 ```
 
-註：`riscv64gc-unknown-none-elf` 這個架構是在後面的作業改用的編譯器，主要差別在與支援更多 RISC-V 的 extension instruction。
+> 註：`riscv64gc-unknown-none-elf` 這個架構是在後面的作業改用的編譯器，主要差別在與支援更多 RISC-V 的 extension instruction。
 小撇步：我是後來才發現的，全域變數如果需要在程式開始之後才初始化，可以宣告為 `spin` 這個 crate 裡面的 `Once` 這個形態，寫起來比較方便（參考 Lab 6、Lab 7）。
+
+## 超級重要
+務必參考[這篇文章](https://zhuanlan.zhihu.com/p/343688629)來了解 C 裡面 volatile 的用法，基本上 Rust 也適用。後面進入到有 Context Switch 時如果遇到奇怪的錯誤可能會是因為沒有 volatile 所導致的！不過也要搞清楚與 atomic 的使用時機。
+
+> 註：如果有必要，也可以使用別人包裝好的 volatile crate ，簡化 volatile 需要的 unsafe 操作。
 
 ## Basic Initialization
 
@@ -86,7 +91,7 @@ UART 的輸入就是等 Data Ready 為 1 之後讀取 RBR ，等 TDRQ 為 1 之�
 ## System Information
 Open SBI 相關知識可以看上課講義，或是這兩個連結：[1](https://zhuanlan.zhihu.com/p/1924502497390736107)、[2](https://ithelp.ithome.com.tw/articles/10290939)。
 
-PS:上面的第一個連結包含了助教程式碼的解析， Demo 前最好看過，助教會問相關問題。
+> PS:上面的第一個連結包含了助教程式碼的解析， Demo 前最好看過，助教會問相關問題。
 
 透過 Open SBI 開機 （M Mode），並且進入 S Mode 的 Kernel 之後，如果要取用一些硬體的功能，就必須使用 `ecall` 將參數傳給 M Mode 的 Open SBI 然後讀取回傳值。我的程式一開始因為嫌麻煩，所以沒有自己寫，直接用了 exercise 裡面的程式，如果要在 Rust 裡面直接寫，而非另外 Call C 語言的 Function 可以參考以下程式：
 
