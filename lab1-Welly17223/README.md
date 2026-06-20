@@ -83,6 +83,7 @@ Exercise 裡面有提供 QEMU 的 UART address ，這一個作業是要去查 Or
 UART 的輸入就是等 Data Ready 為 1 之後讀取 RBR ，等 TDRQ 為 1 之後寫入 THR。這裡建議可以建立 UART struct ，並且 `impl core::fmt::Write`，這樣可以使用 format output 了（可以參考 Lab 2 的程式碼）。在 Lab 2 之後會有方式讓程式不用將硬體 Address Hard Code 在程式碼裡面，所以這個 Lab UART 一些程式碼在之後要改。
 
 小坑：UART 是所讀取的是 MMIO 記憶體，因此需要 volatile ，在 release 模式下才不會出問題。
+
 小坑：這臺 Orange Pi 上有很多個 UART 裝置，記得要找 debug 孔的那一個。
 
 ## Simple Shell
