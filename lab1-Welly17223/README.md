@@ -13,7 +13,8 @@ Lab 0 介紹的是以 C 為主的環境，建立好之後，要跑 Rust 還要�
 target = "riscv64imac-unknown-none-elf"
 ```
 3. 在 `main.rs` 裡面需要標注 `#![no_std]`、`#![no_main]` 標示不使用 `std` 並且沒有傳統意義上的 main 函數（需在 `start.s` 裡面呼叫）。
-4. 自訂 panic handler 。會在程式 panic 時呼叫這個函數。一開始可以簡單這樣寫，後面在根據需要在 panic 時印出對應的訊息。(註：我在 Lab 6 之後才寫好比較 方便除錯的 panic handler ，如果參考可以飛過去)
+4. 自訂 panic handler 。會在程式 panic 時呼叫這個函數。一開始可以簡單這樣寫，後面在根據需要在 panic 時印出對應的訊息。
+> 註：我在 Lab 6 之後才寫好比較 方便除錯的 panic handler ，如果參考可以飛過去
 ```rust
 #[panic_handler]
 fn panic(_panic: &PanicInfo<'_>) -> ! {
@@ -38,7 +39,6 @@ fn main() {
     println!("cargo:rerun-if-changed=src/sbi.c");
     println!("cargo:rerun-if-changed=src/start.s");
 }
-
 ```
 `Cargo.toml` 要記得加入 build dependency `cc` 跟 panic handler：
 ```toml
@@ -70,7 +70,7 @@ panic = "abort"
 
 > 註：`la` 這個指令會根據目前的 `pc` （program counter）做偏移來算出對應 label 的記憶體位置。
 
-Linker file 要這樣寫，首先是將 `.text.boot` 這個在 `start.s` 裡面定義的 section 在 link 時放到程式的最前面，以確保在開機初始化之後跳到程式所在的位置時，這一段程式可以被第一個執行；之後依序放入 `.text`、`.data`、`.rodata`、`.bss` 以及最後面的 stack。（註：雖然程式裡面的這些 section 預設都是 8 bytes aligned 的，不過最好在 linker file 裡面也自己對齊一下以確保不會出錯）
+Linker file 這樣寫首先是將 `.text.boot` 這個在 `start.s` 裡面定義的 section 在 link 時放到程式的最前面，以確保在開機初始化之後跳到程式所在的位置時，這一段程式可以被第一個執行；之後依序放入 `.text`、`.data`、`.rodata`、`.bss` 以及最後面的 stack。
 
 大坑：如果這裡的 stack 給得太小，在後面 Lab 裡面 local variable 越來越多之後，有可能會 stack overflow ，而且由於程式在這裡是不會做邊界檢查的，所以很有可能蓋到前面的其他 section 而不自覺，十分危險；所以這裡 stack 大小建議可以給大一點（如 2 MB 之類的），4 KB 確實有點太小了。
 
