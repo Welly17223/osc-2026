@@ -33,14 +33,14 @@ impl Uart {
     }
 
     pub fn getc(&self) -> u64 {
-        while unsafe { *self.listen_status_register } & LSR_DR == 0 {}
-        let ch: u64 = unsafe { *self.receive_buffer_register } as u64;
+        while unsafe { self.listen_status_register.read_volatile() } & LSR_DR == 0 {}
+        let ch: u64 = unsafe { self.receive_buffer_register.read_volatile() } as u64;
         if ch == '\r' as u64 { '\n' as u64 } else { ch }
     }
 
     pub fn get_raw_byte(&self) -> u64 {
-        while unsafe { *self.listen_status_register } & LSR_DR == 0 {}
-        let ch: u64 = unsafe { *self.receive_buffer_register } as u64;
+        while unsafe { self.listen_status_register.read_volatile() } & LSR_DR == 0 {}
+        let ch: u64 = unsafe { self.receive_buffer_register.read_volatile() } as u64;
         ch
     }
 
@@ -56,8 +56,8 @@ impl Uart {
         if ch == b'\n' {
             self.putc(b'\r');
         }
-        while unsafe { *self.listen_status_register } & LSR_TDRQ == 0 {}
-        unsafe { *self.transmit_holding_register = ch };
+        while unsafe { self.listen_status_register.read_volatile() } & LSR_TDRQ == 0 {}
+        unsafe { self.transmit_holding_register.write_volatile(ch) };
     }
 
     pub fn puts<T: AsRef<[u8]>>(&self, string: T) {

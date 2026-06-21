@@ -1,5 +1,6 @@
 TARGET_DIR=target/riscv64imac-unknown-none-elf/debug/
 CARGO_FLAGS=
+RUST_FLAGS=
 
 all: kernel bootloader
 
@@ -8,8 +9,9 @@ run: kernel
 
 bootloader: CARGO_FLAGS+=--release
 bootloader: TARGET_DIR=target/riscv64imac-unknown-none-elf/release/
+bootloader: RUST_FLAGS=-C relocation-model=static -C code-model=medium -C link-arg=-no-pie
 bootloader:
-	cargo build $(CARGO_FLAGS) -p bootloader
+	RUSTFLAGS="$(RUST_FLAGS)" cargo build $(CARGO_FLAGS) -p bootloader
 	riscv64-elf-objcopy -O binary ${TARGET_DIR}/bootloader ${TARGET_DIR}/bootloader-kernel.bin
 
 kernel:

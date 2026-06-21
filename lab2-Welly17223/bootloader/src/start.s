@@ -1,6 +1,23 @@
 .section ".text.boot"
 .global _start
 _start:
+    la t0, _start
+    la t1, __bss_stop
+    li t2, 0x82000000
+    mv t3, t0
+    mv t4, t2
+mv_start:
+    ld t5, 0(t3)
+    addi t3, t3, 8
+    sd t5, 0(t4)
+    addi t4, t4, 8
+    blt t3, t1, mv_start
+    la t1, 1f
+    fence.i
+    sub t1, t1, t0
+    add t1, t2, t1
+    jr t1
+1:
     la a3, __bss_start
     la a4, __bss_stop
     ble a4, a3, clear_bss_done
