@@ -202,8 +202,8 @@ impl PageAllocator {
                 self.free_lists[curr_order].pop_head();
 
                 let pair_idx = pair_order(node.page_index as u32, (curr_order - 1) as u32) as usize;
-                self.pages[node.page_index].state = PageState::Avaliable(curr_order - 1);
-                self.pages[pair_idx].state = PageState::Avaliable(curr_order - 1);
+                self.pages[node.page_index].state = PageState::Available(curr_order - 1);
+                self.pages[pair_idx].state = PageState::Available(curr_order - 1);
 
                 debug!(
                     "[+] Add page 0x{:x} to order 0x{:x}. Range of pages: [0x{:x}, 0x{:x}]",
@@ -276,13 +276,13 @@ impl PageAllocator {
             return;
         };
         let origional_order = order;
-        page_frame.state = PageState::Avaliable(order);
+        page_frame.state = PageState::Available(order);
         let page_node = &mut self.free_list_pool[page.index];
 
         let pair_index = pair_order(page.index as u32, order as u32) as usize;
 
         if pair_index >= self.pages.len() {
-            self.pages[page.index].state = PageState::Avaliable(order);
+            self.pages[page.index].state = PageState::Available(order);
             *page_node = FreePageNode::new(page.index);
             self.free_lists[order].insert_from_ptr(page_node as *mut FreePageNode);
             debug!(
@@ -307,7 +307,7 @@ impl PageAllocator {
 
         let pair_frame = &mut self.pages[pair_index];
         match pair_frame.state {
-            PageState::Avaliable(pair_order) if pair_order == order => (),
+            PageState::Available(pair_order) if pair_order == order => (),
             _ => {
                 debug!(
                     "[+] Add page 0x{:x} to order {}. Range of pages: [0x{:x}, 0x{:x}]",
@@ -324,7 +324,7 @@ impl PageAllocator {
                     order,
                     self.free_lists[order].header
                 );
-                self.pages[page.index].state = PageState::Avaliable(order);
+                self.pages[page.index].state = PageState::Available(order);
                 *page_node = FreePageNode::new(page.index);
                 self.free_lists[order].insert_from_ptr(page_node as *mut FreePageNode);
                 return;
@@ -344,7 +344,7 @@ impl PageAllocator {
             }
 
             match (&self.pages[base_index].state, &self.pages[pair_index].state) {
-                (PageState::Avaliable(o1), PageState::Avaliable(o2))
+                (PageState::Available(o1), PageState::Available(o2))
                     if *o1 == order && *o1 == *o2 => {}
                 _ => break,
             }
@@ -378,7 +378,7 @@ impl PageAllocator {
 
             order += 1;
             self.pages[pair_index].state = PageState::BuddyOf;
-            self.pages[base_index].state = PageState::Avaliable(order);
+            self.pages[base_index].state = PageState::Available(order);
             self.free_list_pool[base_index] = FreePageNode::default();
 
             curr_base = base_index;
@@ -492,7 +492,7 @@ impl PageAllocator {
             free_list_pool[curr_pages_init_count] = FreePageNode::new(curr_pages_init_count);
             free_lists[curr_order as usize]
                 .insert_from_ptr((&free_list_pool[curr_pages_init_count]) as *const FreePageNode);
-            pages[curr_pages_init_count].state = PageState::Avaliable(curr_order as usize);
+            pages[curr_pages_init_count].state = PageState::Available(curr_order as usize);
             pages[(curr_pages_init_count + 1)..next_idx]
                 .iter_mut()
                 .for_each(|curr_page| {
@@ -533,7 +533,7 @@ impl Page {
 
 #[derive(Debug, Clone, Copy)]
 pub enum PageState {
-    Avaliable(usize),
+    Available(usize),
     BuddyOf,
     Occupied(usize),
     OccupiedSlab,

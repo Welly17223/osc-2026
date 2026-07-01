@@ -236,7 +236,7 @@ impl MemoryAllocator {
                 self.buddy_allocators.free_pages(Page::new(page_idx, ptr));
                 o as isize
             }
-            PageState::Avaliable(o) => o as isize,
+            PageState::Available(o) => o as isize,
             _ => -1,
         };
 

@@ -53,9 +53,14 @@ panic = "abort"
 ```
 
 > 註：`riscv64gc-unknown-none-elf` 這個架構是在後面的作業改用的編譯器，主要差別在與支援更多 RISC-V 的 extension instruction。
-小撇步：我是後來才發現的，全域變數如果需要在程式開始之後才初始化，可以宣告為 `spin` 這個 crate 裡面的 `Once` 這個形態，寫起來比較方便（參考 Lab 6、Lab 7）。
+<!-- 小撇步：我是後來才發現的，全域變數如果需要在程式開始之後才初始化，可以宣告為 `spin` 這個 crate 裡面的 `Once` 這個形態，寫起來比較方便（參考 Lab 6、Lab 7）。 -->
+
+關於操作 unsafe rust 的細節：[Rustonomicon](https://doc.rust-lang.org/nomicon/index.html) ，建議如果對於指標、記憶體等 C 的概念不太熟悉，或是對 Rust unsafe 沒有那麼熟的都去看看，可以少走彎路。
+
+接下來就可以開始你的 [core](https://doc.rust-lang.org/core/) rust 之旅了！
 
 ## 超級重要
+
 務必參考[這篇文章](https://zhuanlan.zhihu.com/p/343688629)來了解 C 裡面 volatile 的用法，基本上 Rust 也適用。後面進入到有 Context Switch 時如果遇到奇怪的錯誤可能會是因為沒有 volatile 所導致的！不過也要搞清楚與 atomic 的使用時機。
 
 > 註：如果有必要，也可以使用別人包裝好的 volatile crate ，簡化 volatile 需要的 unsafe 操作。

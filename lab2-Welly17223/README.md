@@ -39,7 +39,7 @@
 
 ## Device tree
 
-Parse Device Tree 的部分應該算是頗簡單的，跟著 Spec、Exercise 刻就可以了。在 Rust 裡面使用 Raw pointer 真的是需要一定的熟悉呢，當初也是參考網路上很多的教學。不過現代語言的強大抽象能力也是 Rust 的優點之一，可以透過把遍歷 Device Tree 的過程抽象成一個 Rust 的 iterator 讓之後如果需要新的函數也需要遍歷 Device Tree 的時候就不用重寫這一部分的程式了；這裡做一個比較，在做 iterator 前，由於很多功能都需要遍歷 Device tree ，因此有很多重複的程式碼，整個檔案高達 600 多行，在實做 Iterator 之後就只剩 300 多行了。就算是使用 C 來寫也可以考慮類似的做法，讓程式更加簡潔。
+Parse Device Tree 的部分應該算是頗簡單的，跟著 Spec、Exercise 刻就可以了。當初也是參考網路上很多關於 raw pointer 的教學。不過現代語言的強大抽象能力也是 Rust 的優點之一，可以透過把遍歷 Device Tree 的過程抽象成一個 Rust 的 iterator 讓之後如果需要新的函數也需要遍歷 Device Tree 的時候就不用重寫這一部分的程式了；這裡做一個比較，在做 iterator 前，由於很多功能都需要遍歷 Device tree ，因此有很多重複的程式碼，整個檔案高達 600 多行，在實做 Iterator 之後就只剩 300 多行了。就算是使用 C 來寫也可以考慮類似的做法，讓程式更加簡潔。實做方法也可以參考網路上的 [crate](https://docs.rs/fdt/latest/fdt/index.html) 。
 
 記得要用 `[repr(C)]` 標注 struct 才能在執行時用 C 語言的標準來存取對應 offset 的變數。格式裡面定義的 `uint32_t` 可以直接對應到 Rust 裡面的 `u32`，記得在存取資料時要把資料用 
 `swap_bytes` 轉成 little-endian 。
@@ -104,6 +104,38 @@ pub struct Cpio {
     pub check: [c_char; 8],
 }
 ```
+
+## 檔案架構改變
+一開始為了讓一些 library 性質的程式可以被 bootloader 以及 main 複用，因此將 library 獨立出來，變成一個獨立的 crate 。不過在實做 memory allocator 之後，由於 bootloader 是不會做 memory 相關的事情，因此會導致修改之後的部分 library 程式碼無法使用，因此我最後是把 bootloader 所需要的 minium 程式碼獨立出來放在 bootloader 裡面。
+
+# 補記 —— Rust 指標操作與全域變數
+
+Rust 雖然一向以記憶體安全出名，但是仍然保有了 pointer ，可以安全的加減，並且以 `unsafe` 的方式來讀取、寫入。寫過 C 應該都對於指標的操作相當熟悉，而 Rust 裡面的指標操作大致上與 C 相同：
+- 可以從整數形態用 `as` 直接轉變
+- 可以從用 `&raw const` 、 `&raw mut` 從變數轉變，也可以從 reference 直接轉變
+- 可以從一種指標轉換成另外一種
+- `unsafe { &*ptr }` 可以將指標轉換成 reference 、 `core::ptr::slice_from_raw_part(ptr, len)` 則可以將指標 `*const T` 轉換成 `*const [T]`。
+- 解引用（deference）取得指標原本所持有的變數的所有權，因此要小心使用。在 `#[derive(Clone, Copy)]` 之後下面的程式碼 `assert_eq` 都回過，主要原因是在第一次解引用時，其實做了一次 Copy ，並且將 5 寫入副本裡面，而這個副本的生命週期在這一行之後就結束了，所以這個賦值是無效的，也不會變原本 struct 裡面的內容。
+```rust
+#[derive(Clone, Copy)]
+struct Ttt {
+    pub n: usize,
+}
+
+let mut st = Ttt {n: 10};
+let ptr = &raw mut st;
+
+unsafe { *ptr }.n = 5;
+assert_eq!(st.n, 10);
+
+unsafe { &mut *ptr }.n = 5;
+assert_eq!(st.n, 5);
+```
+更多詳細的部分可以參考 [`std::ptr`](https://doc.rust-lang.org/std/ptr/index.html) 和 [Primitive type pointer](https://doc.rust-lang.org/std/primitive.pointer.html)
+
+Rust 裡面的全域變數分成三種： `const` 、 `static` 、 `static mut` ，可以和 C 裡面的 `const` 跟 `static` 對應。其中 `static` 不同於 `const` 通常用在有提供內部可變性並且在程式裡真正會改變其值的變數上，如：`core::atomic` 裡面的原子變數等。為了避免 Race Condition 等平行畫程式會出現的問題，一個形態要被宣告為全域變數在 Rust 裡面必須要有 Sync 這個 trait 才行；然而在 Kernel 開發裡，有很多全域變數是需要在程式開始之後才能初始化（如讀取 Device Tree 、依賴 Memory Allocator 等），這也造成宣告全域變數時需要與編譯器搏鬥一番。對於這個問題，以結論來說，建議使用 [spin](https://docs.rs/spin/latest/spin/index.html) 這個 crate 裡面的 `Once` ，在 core 模式下能用並且能讓變數延遲初始化；或者是使用 `static mut` 形態為 `Option<T>` 並且初始化為 `None` 。[這一篇文章](https://www.sitepoint.com/rust-global-variables/)有講述 Rust 全域變數的宣告跟使用方法，但是不完全適用在 bare metal 的環境，可以斟酌參考。
+
+Send 跟 Sync 這兩個概念是 Rust 給與形態在多線程分享訊息的方法，可以參考 [這裡](https://rust-lang.tw/book-tw/ch16-04-extensible-concurrency-sync-and-send.html) 來複習相關的概念。
 
 # 心得
 這一章開始出現許多記憶體操作，像是 Self relocation、Kernel Upload 等，並且在寫入之後會跳過去執行！？雖然之前就知道程式碼存在記憶體裡並且執行，但是這還是第一次「手動」載入程式碼，與之前只有操作記憶體的「讀取」跟「寫入」完全不一樣，`pc+4` 這個在計算機組織裡面寫過的電路，在這裡變成了實際操作的現實。不過這也給我留下了一個疑問：之前學習的「一個程式碼的 text 部分是唯獨的」以及 linker file 裡面，有程式碼屬性（`rwx`）的設定，這些好像沒什麼用？這些疑問到了 virtual memory 才獲得解答。
