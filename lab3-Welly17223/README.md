@@ -85,7 +85,7 @@ for i in pages.iter_mut() {
 
 > 註：這裡的 buddy allocator 有一些 bug 是在後面的 Lab 發現的。
 > - 在 free list 嘗試 pop 中段時沒有判斷是否為尾部，因此會出錯。在 Lab 6 的程式裡面有做修復。
-> - 有些指標寫入操作使用 `unsafe { *ptr } = value` 這樣的形式，結合 lab 2 筆記的補充說明是無法做寫入的，應該改成 `unsafe { &mut *ptr } = value` 。也是在 Lab 6 修復。
+> - 有些指標寫入操作使用 `unsafe { *ptr } = value` 這樣的形式，結合 [lab 2 筆記的補充說明](/lab2-Welly17223/README.md#補記-rust-指標操作與全域變數)是無法做寫入的，應該改成 `unsafe { &mut *ptr } = value` 。也是在 Lab 6 修復。
 
 補充找出 pages 的 pair 的算式：
 $$
@@ -147,7 +147,7 @@ struct DynamicAllocatorHeader_16Bytes {
 可以將我們寫好的 memory allocator 實做 `core::alloc::GlobalAlloc` 這個 trait ，之後就可以使用 `alloc` 這個 crate 裡面的功能了，包含之前提到的 `Vec`、`BTreeMap`、`BinaryHeap`、`String` 等資料結構以及 `Arc`、`Box` 等 smart pointer 。
 
 在實做的時候有些要注意的地方：
-1. 由於 Rust 對於 `global_allocator` 要求必須是 `static` 且不可變，因此需要讓我們自己假設的 Global Allocator 擁有內部可變性，在這裡一樣使用 Mutex ，不過要注意這會導致 dead locak ，如果你在 allocator 內部呼叫有可能會使用到 dynamic memory 的函數或是 interrupt 。
+1. 由於 Rust 對於 `global_allocator` 要求必須是 `static` 且不可變，因此需要讓我們自己假設的 Global Allocator 擁有內部可變性，在這裡一樣使用 `Mutex` ，不過要注意這會導致 deadlock ，如果你在 allocator 內部呼叫有可能會使用到 dynamic memory 的函數或是 interrupt 。
 2. Rust 會需要 layout 這個參數，不過在 Kernel 裡面，我們先前實做的 memory allocator 會 aligned 到 allocate memory 的大小，因此要注意不要用 dynamic 記憶體分配超過本身大小 aligned 的變數。
 
 ## C 的 `kmalloc`

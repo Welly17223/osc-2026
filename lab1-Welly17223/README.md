@@ -1,8 +1,11 @@
 # Lab 1
 [作業連結](https://nycu-caslab.github.io/OSC2026/labs/lab1.html)
+
 [Exercise](https://reurl.cc/dq6992)
 
 ## Rust 環境建立
+
+疊個甲，由於是在學期間寫完的程式，因此架構十分混亂，敬請見諒，目前正在整理中了。
 
 Lab 0 介紹的是以 C 為主的環境，建立好之後，要跑 Rust 還要有其他的設定。
 
@@ -59,6 +62,8 @@ panic = "abort"
 
 接下來就可以開始你的 [core](https://doc.rust-lang.org/core/) rust 之旅了！
 
+寫完才看到這個 [Blog](https://osblog.stephenmarz.com/index.html) ，應該可以作為參考。
+
 ## 超級重要
 
 務必參考[這篇文章](https://zhuanlan.zhihu.com/p/343688629)來了解 C 裡面 volatile 的用法，基本上 Rust 也適用。後面進入到有 Context Switch 時如果遇到奇怪的錯誤可能會是因為沒有 volatile 所導致的！不過也要搞清楚與 atomic 的使用時機。
@@ -81,11 +86,11 @@ Linker file 這樣寫首先是將 `.text.boot` 這個在 `start.s` 裡面定義�
 
 ## UART Setup
 
-Exercise 裡面有提供 QEMU 的 UART address ，這一個作業是要去查 Orange Pi RV2 的 Spec 並且讓 UART 能夠在板子上跑。在這個 Lab 裡面會使用這些 UART 的記憶體：
+Exercise 裡面有提供 QEMU 的 UART address （看 [spec](https://ww1.microchip.com/downloads/aemDocuments/documents/FPGA/ProductDocuments/UserGuides/ip_cores/directcores/Core16550_HB.pdf) 深入瞭解這些 MMIO register），這一個作業是要去查 Orange Pi RV2 的 Spec 並且讓 UART 能夠在板子上跑。在這個 Lab 裡面會使用這些 UART 的記憶體：
 - Receive Buffer Register(RBR)
 - Transmit Holding Register(THR)
 - Line Status Register(LSR) 的 Data Ready(DR) 跟 Transmit Data Request(TDRQ) 這兩個 bit。
-UART 的輸入就是等 Data Ready 為 1 之後讀取 RBR ，等 TDRQ 為 1 之後寫入 THR。這裡建議可以建立 UART struct ，並且 `impl core::fmt::Write`，這樣可以使用 format output 了（可以參考 Lab 2 的程式碼）。在 Lab 2 之後會有方式讓程式不用將硬體 Address Hard Code 在程式碼裡面，所以這個 Lab UART 一些程式碼在之後要改。
+UART 的輸入就是等 Data Ready 為 1 之後讀取 `RBR` ，等 `TDRQ` 為 1 之後寫入 `THR`。這裡建議可以建立 UART struct ，並且 `impl core::fmt::Write`，這樣可以使用 format output 了（可以參考 Lab 2 的程式碼）。在 Lab 2 之後會有方式讓程式不用將硬體 Address Hard Code 在程式碼裡面，所以這個 Lab UART 一些程式碼在之後要改。
 
 小坑：UART 是所讀取的是 MMIO 記憶體，因此需要 volatile ，在 release 模式下才不會出問題。
 

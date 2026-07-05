@@ -37,6 +37,10 @@
 
 > 註：由於我再 Lab 6 裡面由於程式需要才完成了 Self relocation 的相關程式，因此 Lab 3 ~ Lab 5 的程式裡面仍使用的是沒有 Self relocation 的 bootloader 跟 Linker file 在參考時請注意。Lab 2 我應該已經改成 Self relocation 的 bootloader 了。
 
+
+### 討論：為什麼 Bootloader 可以編譯為 Position-independent 的程式碼而 Kernel 沒有一樣的要求
+TODO
+
 ## Device tree
 
 Parse Device Tree 的部分應該算是頗簡單的，跟著 Spec、Exercise 刻就可以了。當初也是參考網路上很多關於 raw pointer 的教學。不過現代語言的強大抽象能力也是 Rust 的優點之一，可以透過把遍歷 Device Tree 的過程抽象成一個 Rust 的 iterator 讓之後如果需要新的函數也需要遍歷 Device Tree 的時候就不用重寫這一部分的程式了；這裡做一個比較，在做 iterator 前，由於很多功能都需要遍歷 Device tree ，因此有很多重複的程式碼，整個檔案高達 600 多行，在實做 Iterator 之後就只剩 300 多行了。就算是使用 C 來寫也可以考慮類似的做法，讓程式更加簡潔。實做方法也可以參考網路上的 [crate](https://docs.rs/fdt/latest/fdt/index.html) 。
@@ -108,7 +112,7 @@ pub struct Cpio {
 ## 檔案架構改變
 一開始為了讓一些 library 性質的程式可以被 bootloader 以及 main 複用，因此將 library 獨立出來，變成一個獨立的 crate 。不過在實做 memory allocator 之後，由於 bootloader 是不會做 memory 相關的事情，因此會導致修改之後的部分 library 程式碼無法使用，因此我最後是把 bootloader 所需要的 minium 程式碼獨立出來放在 bootloader 裡面。
 
-# 補記 —— Rust 指標操作與全域變數
+## 補記 —— Rust 指標操作與全域變數
 
 Rust 雖然一向以記憶體安全出名，但是仍然保有了 pointer ，可以安全的加減，並且以 `unsafe` 的方式來讀取、寫入。寫過 C 應該都對於指標的操作相當熟悉，而 Rust 裡面的指標操作大致上與 C 相同：
 - 可以從整數形態用 `as` 直接轉變
