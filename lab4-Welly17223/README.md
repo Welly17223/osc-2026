@@ -203,6 +203,8 @@ extern "C" fn do_trap(regs: *mut pt_regs) {}
 
 > 註：以上關於 `CSR` 的操作都可以用 `riscv` crate 達成，詳情可以直接看 code 。在這一個作業裡面，由於沒有 scheduler ，因此執行助教給的程式之後，就會進入無限循環。
 
+要小心 kernel thread 要設定的大一點，不要 stack overflow ，否則又是 debug 一輩子。
+
 ## Core Timer Interrupt
 
 這個作業基本上沒有什麼難的地方，除了助教在作業裡面寫的流程以外記得
