@@ -1,8 +1,9 @@
-use core::alloc;
-use core::fmt;
-use core::ptr;
+use core::{alloc, fmt, ptr};
 
-use crate::{fdt, virtual_mem};
+use crate::{
+    fdt,
+    virtual_mem::{self, VirtualAddress},
+};
 use log::debug;
 
 use buddy_alloc::Page;
@@ -25,7 +26,7 @@ unsafe impl alloc::GlobalAlloc for GlobalAllocator {
         let mut lock = self.allocator.lock();
         if let Some(allocator) = &mut *lock {
             if let Some(ptr) = allocator.malloc(layout.size()) {
-                virtual_mem::phy_to_virt(ptr) as *mut u8
+                virtual_mem::phy_to_virt(virtual_mem::PhysicalAddress(ptr)).addr() as *mut u8
             } else {
                 ptr::null_mut()
             }
@@ -37,7 +38,7 @@ unsafe impl alloc::GlobalAlloc for GlobalAllocator {
     unsafe fn dealloc(&self, ptr: *mut u8, _layout: alloc::Layout) {
         let _disable_interrupt = crate::interrupt::SModeInterrupt::new();
         if let Some(allocator) = self.allocator.lock().as_mut() {
-            allocator.free(virtual_mem::virt_to_phy(ptr as usize));
+            allocator.free(virtual_mem::virt_to_phy(VirtualAddress(ptr as usize)).addr());
         }
     }
 }
@@ -383,7 +384,7 @@ pub fn get_memory_layout(
     let mem_range =
         unsafe { &mut *(kernel_end.wrapping_byte_add(curr_heap_byte_offset) as *mut MemoryRange) };
     *mem_range = MemoryRange {
-        base: (kernel_start as usize) - virtual_mem::PAGE_OFFSET + phy_base,
+        base: (kernel_start as usize) - virtual_mem::PAGE_OFFSET.addr() + phy_base,
         size: reserved_for_page + (kernel_end as usize) - (kernel_start as usize),
     };
     curr_heap_byte_offset += size_of::<MemoryRange>();
@@ -422,12 +423,15 @@ pub fn init_memory_allocator(
         VIRT_IO_REMAN_BEGIN = align(
             memory_layout.avaliable_memory.last().unwrap().end(),
             PGD_SIZE,
-        ) + PAGE_OFFSET;
+        ) + PAGE_OFFSET.addr();
     }
     memory_layout.avaliable_memory.iter().for_each(|range| {
         use crate::virtual_mem::*;
         for i in (range.base & PGD_MASK..range.end()).step_by(PGD_SIZE) {
-            unsafe { PGD[vpn2(phy_to_virt(i))] = PageTableEntry::new(i, PROT_KERNEL) };
+            unsafe {
+                PGD[PhysicalAddress(i).into_virt().vpn2()] =
+                    PageTableEntry::new(PhysicalAddress(i), PROT_KERNEL)
+            };
         }
     });
 

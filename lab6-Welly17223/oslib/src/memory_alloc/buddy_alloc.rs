@@ -564,7 +564,7 @@ impl Page {
     }
 
     pub fn virt_addr(&self) -> usize {
-        virtual_mem::phy_to_virt(self.base_addr)
+        virtual_mem::phy_to_virt(virtual_mem::PhysicalAddress(self.base_addr)).addr()
     }
 
     pub fn new(index: usize, base_addr: usize) -> Self {

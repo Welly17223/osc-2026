@@ -388,7 +388,7 @@ impl DynamicAllocator {
 
     pub fn free(&mut self, ptr: usize) {
         use crate::virtual_mem;
-        let virt_ptr = virtual_mem::phy_to_virt(ptr);
+        let virt_ptr = virtual_mem::phy_to_virt(virtual_mem::PhysicalAddress(ptr)).addr();
         let header = unsafe { &*((virt_ptr & PAGE_MASK) as *mut DynamicAllocatorHeader) };
 
         match header.class {

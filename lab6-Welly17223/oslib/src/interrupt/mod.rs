@@ -1,15 +1,14 @@
-use crate::interrupt::timer::offset_sec;
-use crate::schedule::current_tcb;
-use crate::{fdt, interrupt::plic::IRQ, uart::SERIAL};
-use crate::{schedule, thread, uart, virtual_mem};
-use core::arch::asm;
-use core::cmp::Ordering;
-use core::sync::atomic::AtomicBool;
-use core::{ffi, panic};
+use crate::{
+    fdt,
+    interrupt::{plic::IRQ, timer::offset_sec},
+    schedule::{self, current_tcb},
+    thread,
+    uart::{self, SERIAL},
+    virtual_mem,
+};
+use core::{arch::asm, cmp::Ordering, ffi, fmt::Display, panic, sync::atomic::AtomicBool};
 extern crate alloc;
-use alloc::boxed::Box;
-use alloc::string::String;
-use core::fmt::Display;
+use alloc::{boxed::Box, string::String};
 
 pub mod input_handler;
 pub mod page_fault;
@@ -544,12 +543,14 @@ extern "C" fn do_trap(regs: *mut pt_regs) {
                     unsafe { Box::<[u8; virtual_mem::PMD_SIZE]>::new_uninit().assume_init() };
                 let stack_len = stack.len();
 
-                let mut pgd = current_tcb().pgd.as_mut().unwrap().as_mut();
+                let pgd = current_tcb().vm_mapper.as_mut().unwrap().pgd.as_mut();
                 let virt_addr =
                     crate::align(regs.sscratch, virtual_mem::PMD_SIZE) - virtual_mem::PMD_SIZE;
-                let pmd = pgd.try_new_entry(virtual_mem::vpn0(virt_addr), virtual_mem::PMD_SHIFT);
-                pmd[virtual_mem::vpn1(virt_addr)] = virtual_mem::PageTableEntry::new(
-                    virtual_mem::virt_to_phy(stack.as_ref() as *const _ as _),
+
+                let pmd =
+                    pgd.try_new_entry(virtual_mem::vpn0(virt_addr.into()), virtual_mem::PMD_SHIFT);
+                pmd[virtual_mem::vpn1(virt_addr.into())] = virtual_mem::PageTableEntry::new(
+                    virtual_mem::virt_to_phy((stack.as_ref() as *const _ as usize).into()),
                     virtual_mem::PROT_USER_STACK,
                 );
                 curr_sig.sig_stack = Some(stack);
