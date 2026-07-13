@@ -213,7 +213,7 @@ pub fn control_input() {
 
                     let mut prog_regs = interrupt::pt_regs::default();
 
-                    prog_regs.sepc = virtual_mem::USER_MODE_START_ADDRESS;
+                    prog_regs.sepc = virtual_mem::USER_MODE_START_ADDRESS.addr();
                     // spie
                     prog_regs.sstatus = riscv::register::sstatus::read().bits();
                     prog_regs.sstatus |= 1 << 5;

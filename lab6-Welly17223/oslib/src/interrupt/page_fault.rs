@@ -1,14 +1,12 @@
 extern crate alloc;
-use alloc::{boxed::Box, vec, vec::Vec};
+use alloc::boxed::Box;
 
 use crate::{
     schedule, thread, uart,
-    virtual_mem::{
-        self, PAGE_MASK, PTE_F, PTE_M, PTE_V, PTE_W, pagewalk, phy_to_virt, virt_to_phy,
-    },
+    virtual_mem::{self, PTE_F, PTE_W, VirtualAddress},
 };
 
-use core::{arch::asm, cmp::min, fmt::Write, ptr};
+use core::{arch::asm, fmt::Write, ptr};
 
 #[derive(PartialEq, Eq, Debug)]
 pub enum PageFault {
@@ -65,86 +63,44 @@ impl super::InterruptTrait for Interrupt {
         )
         .unwrap();
 
-        let curr_pgd = if let Some(pgd) = tcb.pgd.as_mut() {
-            &mut pgd.as_mut().entries
-        } else {
-            let ptr = &raw mut virtual_mem::PGD;
-            &mut unsafe { &mut *ptr }.entries
-        };
-
-        let mut curr_shift = virtual_mem::PGD_SHIFT;
-        let va = regs.stval;
-        let mut leaf_pte = &raw mut curr_pgd[virtual_mem::vpn(va, curr_shift)];
-
-        while let Some(leaf) = unsafe { &mut *leaf_pte }.to_leaf_ref() {
-            curr_shift -= 9;
-            leaf_pte = &raw mut leaf[virtual_mem::vpn(va, curr_shift)];
-        }
-
-        let leaf_pte = unsafe { &mut *leaf_pte };
-        let leaf_prop = leaf_pte.get_prop();
-
-        if va < tcb.text.target.len() && !leaf_pte.is_valid() {
-            let buttom = va & PAGE_MASK;
-            let size = min(4096, tcb.text.target.len() - buttom);
-            let mut part_text = Box::new([0u8; 4096]);
-            part_text[..size].copy_from_slice(&tcb.text.target[buttom..buttom + size]);
-
-            let root_pgd = tcb.pgd.as_mut().unwrap().as_mut().get_mut();
-
-            pagewalk(
-                root_pgd,
-                buttom,
-                virt_to_phy(Box::into_raw(part_text) as _),
-                virtual_mem::PROT_USER_TEXT,
-            );
-
-            unsafe {
-                asm!("sfence.vma");
+        let va = VirtualAddress(regs.stval);
+        match tcb.vm_mapper.as_mut().unwrap().map_to_phy(va) {
+            Ok(()) => {
+                writeln!(serial, "[Translation fault]: {:#x}", va.addr()).unwrap();
+                let va_aligned = va & virtual_mem::PAGE_MASK;
+                unsafe {
+                    asm!("sfence.vma {}, zero", in(reg) va_aligned.addr());
+                }
             }
-            return;
-        }
+            Err(virtual_mem::vm_area::Error::AlreadyMapPTE { prop_xor })
+                if prop_xor & PTE_W != 0 && interrupt_state.unwrap() == PageFault::StoreAMO =>
+            {
+                writeln!(serial, "prop: {:#b}", prop_xor).unwrap();
 
-        if leaf_pte.is_set(PTE_M) {
-            leaf_pte.set_prop(leaf_prop & (!PTE_M) | PTE_V);
-            let page = vec![0u8; 1 << curr_shift];
-            let (ptr, _, _) = Vec::into_raw_parts(page);
-            leaf_pte.set_pa(virtual_mem::virt_to_phy(ptr as _));
-            unsafe {
-                asm!("sfence.vma");
-            }
-            return;
-        }
-
-        if !leaf_pte.is_valid() {
-            writeln!(serial, "[Segmentation fault]: Kill Process").unwrap();
-            thread::do_exit(1);
-        }
-
-        match interrupt_state.unwrap() {
-            PageFault::StoreAMO if leaf_pte.is_set(PTE_F) => {
-                let new_prop = (leaf_pte.get_prop() & !PTE_F) | PTE_W;
+                let leaf_pte = tcb.vm_mapper.as_mut().unwrap().page_entry_mut(va).unwrap();
+                let new_prop = leaf_pte.get_prop() | PTE_W;
                 let old_page = unsafe {
-                    &*ptr::slice_from_raw_parts(
-                        phy_to_virt(leaf_pte.get_pa()) as *mut u8,
-                        1 << curr_shift,
-                    )
+                    Box::from_raw(ptr::slice_from_raw_parts_mut(
+                        leaf_pte.get_pa().into_virt().addr() as *mut u8,
+                        0x1000,
+                    ))
                 };
-                let page: Box<[u8]> = Box::from(old_page);
+                let page: Box<[u8]> = old_page.clone();
                 *leaf_pte = virtual_mem::PageTableEntry::new(
-                    virtual_mem::virt_to_phy(Box::into_raw(page) as *const () as _),
+                    VirtualAddress(Box::into_raw(page) as *const () as _).into_phy(),
                     new_prop,
                 );
                 writeln!(serial, "[Permission fault]: {:#x}", va).unwrap();
                 let va_aligned = va & virtual_mem::PAGE_MASK;
                 unsafe {
-                    asm!("sfence.vma {}, zero", in(reg) va_aligned);
+                    asm!("sfence.vma {}, zero", in(reg) va_aligned.addr());
                 }
             }
-            _ => {
+            Err(e) => {
+                let error_code: isize = e.into();
                 writeln!(serial, "[Segmentation fault]: Kill Process").unwrap();
-                thread::do_exit(1);
+                thread::do_exit(-error_code);
             }
-        }
+        };
     }
 }

@@ -7,7 +7,7 @@ use crate::{
     schedule::{self, current_pid, current_tcb},
     thread::{self},
     uart::{self, get_serial},
-    virtual_mem,
+    virtual_mem::{self, VirtualAddress},
 };
 use alloc::{boxed::Box, vec, vec::Vec};
 use core::{arch::asm, ffi, fmt::Write, ptr, slice};
@@ -52,29 +52,58 @@ impl InterruptTrait for Interrupt {
                     unsafe { ffi::CStr::from_ptr(regs.a0 as *const ffi::c_char) }.to_bytes();
                 if let Ok(file) = ramdisk::find(unsafe { ramdisk::INITRD_START as _ }, file_name) {
                     let tcb = current_tcb();
-                    virtual_mem::load_user_program(tcb.pgd.as_mut().unwrap(), file);
+                    let mut new_vm_mapper = virtual_mem::vm_area::Manager::new();
+                    new_vm_mapper
+                        .map_file_addr(0_usize.into(), Box::from(file), virtual_mem::PROT_USER_TEXT)
+                        .unwrap();
 
-                    let root_pgd = current_tcb().pgd.as_mut().unwrap().as_mut().get_mut();
-                    let sig_ret_phy_addr =
-                        virtual_mem::virt_to_phy(thread::sig_ret as *const () as usize);
-                    let sig_reg_virt_addr = virtual_mem::USER_MODE_START_ADDRESS
-                        + crate::align(file.len(), virtual_mem::PAGE_SIZE);
-                    virtual_mem::pagewalk(
-                        root_pgd as *mut _,
-                        sig_reg_virt_addr,
-                        sig_ret_phy_addr,
-                        virtual_mem::PROT_USER_TEXT,
-                    );
-                    tcb.sig.sig_ret_addr = sig_reg_virt_addr;
-                    tcb.text.target = file;
+                    new_vm_mapper
+                        .map_addr(
+                            virtual_mem::VirtualAddress(
+                                virtual_mem::USER_MODE_STACK_ADDRESS.addr()
+                                    - 2 * virtual_mem::PMD_SIZE,
+                            ),
+                            2 * virtual_mem::PMD_SIZE,
+                            virtual_mem::PROT_USER_STACK,
+                            virtual_mem::vm_area::Provider::Anonymous,
+                        )
+                        .unwrap();
 
-                    // new_start[0..file.len()].copy_from_slice(file);
-                    tcb.mmap_start_addr = virtual_mem::USER_MODE_START_ADDRESS
-                        + crate::align(file.len(), virtual_mem::PGD_SIZE);
-                    regs.sepc = virtual_mem::USER_MODE_START_ADDRESS;
-                    regs.sscratch = virtual_mem::USER_MODE_STACK_ADDRESS;
+                    let mut sig = thread::SigAct::default();
+
+                    let user_text = unsafe {
+                        &*ptr::slice_from_raw_parts(
+                            &thread::__user_text_start as *const usize as *const u8,
+                            (&thread::__user_text_end) as *const usize as usize
+                                - (&thread::__user_text_start) as *const usize as usize,
+                        )
+                    };
+
+                    let sig_ret_func = thread::sig_ret as *const () as usize;
+                    let sig_ret_func_offset = sig_ret_func & 0xfff;
+                    let u_mode_do_exit_offset =
+                        (thread::u_mode_do_exit as *const () as usize) & 0xfff;
+                    let mut sig_ret_func_copied: Box<[u8]> = Box::from([0u8; 0x1000]);
+                    sig_ret_func_copied[..user_text.len()].copy_from_slice(user_text);
+
+                    let sig_map_base = new_vm_mapper
+                        .map_file(sig_ret_func_copied, virtual_mem::PROT_USER_TEXT)
+                        .unwrap();
+
+                    sig.sig_ret_addr = sig_map_base.addr() + sig_ret_func_offset;
+
+                    tcb.context.satp = new_vm_mapper.satp();
+                    tcb.vm_mapper = Some(Box::new(new_vm_mapper));
+
+                    unsafe {
+                        asm!("csrw satp, {}", in(reg) tcb.context.satp);
+                        asm!("sfence.vma");
+                    }
+
+                    regs.sepc = virtual_mem::USER_MODE_START_ADDRESS.addr();
+                    regs.sscratch = virtual_mem::USER_MODE_STACK_ADDRESS.addr();
                     regs.a0 = 0;
-                    regs.ra = thread::u_mode_do_exit as *const () as _;
+                    regs.ra = sig_map_base.addr() + u_mode_do_exit_offset;
                 } else {
                     regs.a0 = -1_isize as _;
                 }
@@ -184,10 +213,16 @@ impl InterruptTrait for Interrupt {
                     curr_sig.sig_stack.take();
                     let virt_addr = crate::align(prev_regs.sscratch, virtual_mem::PMD_SIZE)
                         - virtual_mem::PMD_SIZE;
-                    let mut pgd = current_tcb().pgd.as_mut().unwrap().as_mut();
-                    let pmd =
-                        pgd.try_new_entry(virtual_mem::vpn0(virt_addr), virtual_mem::PMD_SHIFT);
-                    pmd[virtual_mem::vpn1(virt_addr)] = virtual_mem::PageTableEntry(0);
+                    let pgd = current_tcb()
+                        .vm_mapper
+                        .as_mut()
+                        .unwrap()
+                        .as_mut()
+                        .pgd
+                        .as_mut();
+                    let pmd = pgd
+                        .try_new_entry(virtual_mem::vpn0(virt_addr.into()), virtual_mem::PMD_SHIFT);
+                    pmd[virtual_mem::vpn1(virt_addr.into())] = virtual_mem::PageTableEntry(0);
                 }
 
                 *regs = prev_regs;
@@ -221,62 +256,35 @@ impl InterruptTrait for Interrupt {
                 let length = crate::align(regs.a1, 0x1000);
                 let prop = ((regs.a2 & 0b1111) << 1) | PTE_U;
                 let flags = regs.a3;
-                let start_addr = if addr.is_null()
-                    || (virtual_mem::vpn2(addr as _)
-                        ..=virtual_mem::vpn2(addr as usize + length - 1))
-                        .any(|idx| tcb.pgd.as_ref().unwrap()[idx].is_valid())
-                {
-                    let shift = virtual_mem::virt_shift_align(tcb.mmap_start_addr.trailing_zeros());
-                    let start_addr = crate::align(tcb.mmap_start_addr, 1 << shift);
-                    tcb.mmap_start_addr = start_addr + length;
-                    start_addr
+
+                let mapper = tcb.vm_mapper.as_mut().unwrap();
+                let start_addr = if addr.is_null() {
+                    mapper.map_addr(
+                        VirtualAddress(addr as usize),
+                        length,
+                        prop,
+                        vm_area::Provider::Anonymous,
+                    )
                 } else {
-                    addr as _
-                };
-
-                let mut curr_len = 0;
-                let mut curr_shift;
-                let root_pgd = tcb.pgd.as_mut().unwrap();
-
-                while curr_len < length {
-                    let curr_addr = start_addr + curr_len;
-
-                    let pte = match length - curr_len {
-                        ..PMD_SIZE => {
-                            curr_shift = PTE_SHIFT;
-                            let pmd = root_pgd.try_new_entry(vpn2(curr_addr), PMD_SHIFT);
-                            let pte = pmd.try_new_entry(vpn1(curr_addr), PTE_SHIFT);
-                            &mut pte[vpn0(curr_addr)]
-                        }
-                        PMD_SIZE..PGD_SIZE => {
-                            curr_shift = PMD_SHIFT;
-                            let pmd = root_pgd.try_new_entry(vpn2(curr_addr), PMD_SHIFT);
-                            &mut pmd[vpn1(curr_addr)]
-                        }
-                        PGD_SIZE.. => {
-                            curr_shift = PGD_SHIFT;
-                            &mut root_pgd[vpn2(curr_addr)]
-                        }
-                    };
-
-                    let end_size = curr_len + (1 << curr_shift);
-                    if flags & MmapFlags::MapAnonymous as usize != 0 {
-                        if flags & MmapFlags::MapPopulate as usize != 0 {
-                            let page = vec![0u8; 1 << curr_shift];
-                            let (ptr, _, _) = Vec::into_raw_parts(page);
-                            *pte = PageTableEntry::new(
-                                virt_to_phy(ptr as _),
-                                prop | PTE_V | PTE_A | PTE_D,
-                            );
-                        } else {
-                            pte.set_prop(prop | PTE_M);
-                        }
-                    }
-
-                    curr_len = end_size;
+                    mapper.map(length, prop, vm_area::Provider::Anonymous)
                 }
-                unsafe { asm!("sfence.vma") };
-                regs.a0 = start_addr;
+                .unwrap();
+
+                if flags & 0x8000 != 0 {
+                    for i in (start_addr.addr()..(start_addr.addr() + length)).step_by(0x1000) {
+                        let _ = mapper.map_to_phy(i.into());
+                    }
+                }
+
+                let serial = get_serial();
+                writeln!(
+                    serial,
+                    "mmap: expect at: {:#x} alloc at {:#x} size: {} prop: {:#b}, flags: {:#x}",
+                    addr as usize, start_addr, length, prop, flags
+                )
+                .unwrap();
+
+                regs.a0 = start_addr.addr();
             }
         }
     }
