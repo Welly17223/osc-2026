@@ -39,7 +39,7 @@ ffffffc280600000 0000000010000000 0000000000200000 rw--gad
 
 ![](https://nycu-caslab.github.io/OSC2026/_images/lab6_sv39.png)
 
-這裡設計有參考 [Redox OS Kernel] ，一個由 Rust 寫成的作業系統，主要是將 [virtual memory](#補充rubyvirtual-memory-areart-v-m-a-rtruby) 以及 physical address 以及 virtual memory 分成兩個 struct ，提供更清晰的語義，並且可以提供各自的轉換 method 或是 virtual memory 需要計算的 virtual page number 等，不過比較麻煩的是需要額外實做加減法等 trait 才能直接參予 `usize` 等整數運算。Page table 以及 Page table entry 額外宣告也是一樣的道理。
+這裡設計有參考 [Redox OS Kernel] ，一個由 Rust 寫成的作業系統，主要是將 [virtual memory area](#補充virtual-memory-area-vma) 以及 physical address 以及 virtual memory 分成兩個 struct ，提供更清晰的語義，並且可以提供各自的轉換 method 或是 virtual memory 需要計算的 virtual page number 等，不過比較麻煩的是需要額外實做加減法等 trait 才能直接參予 `usize` 等整數運算。Page table 以及 Page table entry 額外宣告也是一樣的道理。
 
 > 註：為了讓開機的程式可以在 `0xfff_ffc0_0020_0000` 的地方，因此我將 bootloader 改成會 self relocation ，並且將 UART 讀進來的程式寫到 physical address `0x20_0000` 的地方。
 
@@ -107,7 +107,7 @@ pub fn make_satp(pa: PhysicalAddress) -> usize {
 
 設定 user process 的記憶體，主要設定 text 以及 stack 就好，目前沒有 ELF parser 因此無法分別哪些資料是 `text` / `rodata` / `bss` 。
 
-### 補充：<ruby>virtual memory area<rt> v m a </rt></ruby>
+### 補充：virtual memory area (`vma`)
 
 要做 `MMAP` 、 demand paging 或是只是想要管理 user 記憶體都建議實做一下，然而課程上並沒有提及，可能教授認為我們都會吧？總之以下是我主要參考的資料：
 - [Linux Kernel - Virtual Memory management](https://hackmd.io/@naup96321/rkJwaqfIkx)
@@ -134,7 +134,7 @@ pub struct GrantInfo {
 ```
 - [以前交大的 Online course](https://youtu.be/1zMipcUhsOs?si=-R6oG6fuBZZLhJbG)：這個講的很詳細，值得一看。
 
-簡單來說 `vma` 負責的是管理從 `0x0` 到 `0x0000_003f_ffff_ffff` 的使用者記憶體空間，標示了哪些記憶體被分配出去，哪些記憶體可用，下圖是 Linux kernel 實做 `vma` 的概念圖。如果沒有要做 advanced exercise ，那麼可以跳過 `vma` ，做起來應該會相對輕鬆許多。不過後面的筆記還是會以實做 `vma` 的前提來介紹。
+簡單來說<ruby> virtual <rt>v</rt> memory <rt>m</rt> area <rt>a<rt></ruby> 負責的是管理從 `0x0` 到 `0x0000_003f_ffff_ffff` 的使用者記憶體空間，標示了哪些虛擬記憶體地址有映射了以及映射到哪裡，哪些虛擬記憶體位址可用，下圖是 Linux kernel 實做 `vma` 的概念圖。如果沒有要做 advanced exercise ，那麼可以跳過 `vma` ，做起來應該會相對輕鬆許多。不過後面的筆記還是會以實做 `vma` 的前提來介紹。
 
 ![Virtual memory area](https://encrypted-tbn0.gstatic.com/images?q=tbn:ANd9GcQsnUdmr7b1-WcQqLDCEXMO27MON59ZBtYDdqVkb1uvJx2AUY5j7Wnzr2g&s=10)
 
@@ -149,19 +149,147 @@ pub struct Manager {
     vm_free_size: BTreeSet<(usize, VirtualAddress)>,
     pub pgd: Box<PageTable>,
 }
-```
-將此結構加入到 thread control block 裡面，並且用 Option 包住，如果是 kernel thread 就不需要這一個結構。
 
-裡面的 `vm_area` 儲存了已經標注這個 process 可以使用的記憶體空間，當有 page fault 的 interrupt 時程式會優先查看錯誤存取的記憶體空間是否有記錄在 mapping 裡面，如果沒有，就當作違法的存取，直接 segmentation fault 退出，如果有那麼就確認有沒有實體映射以及權限是否正確。而 `vm_free_*` 則代表記憶體中間的洞，當需要映射實體記憶體時，就從空洞裡面尋找可用的記憶體。使用這一個結構，可以同時管理 stack 、 text 以及後面 advanced exercise 所要求要分配的記憶體。
+#[derive(Default, Debug, Clone)]
+struct AreaEntry {
+    size: usize,
+    flags: usize,
+    backed: Provider,
+}
+
+#[derive(Debug, Clone)]
+pub enum Provider {
+    Anonymous,
+    File(Box<[u8]>),
+}
+```
+將此結構加入到 thread control block 裡面，並且用 `Option` 包住，如果是 kernel thread 就不需要這一個結構。
+
+裡面的 `vm_area` 儲存了已經標注這個 process 可以使用的記憶體空間，當有 page fault 的 interrupt 時程式會優先查看錯誤存取的記憶體空間是否有記錄在 mapping 裡面，如果沒有，就當作違法的存取，直接 segmentation fault 退出，如果有那麼就確認有沒有實體映射以及權限是否正確。而 `vm_free_*` 則代表虛擬記憶體位址中沒有被分配映射的部分，當需要映射實體記憶體時，就從空洞裡面尋找可用的記憶體。使用這一個結構，可以同時管理 stack 、 text 以及後面 advanced exercise 所要求要分配的記憶體，是一個寫的時候有點累，但是可以很高效管理虛擬記憶體空間的結構。
+
+已經設定好 `vma` 之後，就可以分配記憶體並且寫入 root page table 了。做法也很簡單，如果是不實做 advanced exercise 的話先判斷 `Provider` ，並且用 Exercise 6-2 裡面的 `pagewalk` 將分配的實體記憶體位址寫入 root page table 裡面。為了解決 external fragmentation ，給使用者做 mapping 的記憶體都使用 4 KB 大小的 page 。
 
 ### Revisit System calls
 
+#### `sstatus.SUM`
+
+在 supervisor mode 要存取有標記 user bit 的記憶體位址時需要將 `sstatus.SUM` 這一個 bit 設定為 1 。在修改如 `UartRead` 以及 `UartWrite` 的 system call 時有兩種方法：
+- 搜尋 page table 將使用者給的 virtual address 轉換成 kernel linear mode mapping 的 virtual address 並且根據此 address 修改。
+- 根據使用者給與的資料與長度建立同樣長度的記憶體，在 system call 結束時，再將結果複製過去。
+
+#### `Exec`
+
+清空重新建立一個 `vma` ，把舊的 drop 掉，並且建立新的 text 以及 stack 映射。
+
+#### `fork`
+
+如果不實做 copy on write 的話會長成這樣：遞迴式的複製 page table 裡面 page entry 的內容，並且建立新的 page table 將原本 page entry 的內容寫進去，最後記得要把 `Context` 裡面 `satp` 的 physical address 改成新的 root page table 的實體地址。如果 copy on write 的話就把 page entry 的內容改成 read only 就好了。
+
+#### Signal 系列的 system call
+
+助教在 Demo 時好像不會看這一方面的內容。如果直接將 kernel space 的 函數直接設定為 signal 的 return 函數，會出現 user mode 無法讀取與執行沒有 "U" bit 的記憶體，因此需要建立這一個函數在 user space 的記憶體映射；同理， user mode 的 return 函數預設是做 exit 的 system call ， 因此也需要做類似的處理。在做映射的時候，同時最好也考慮到不要讓 user mode 的程式執行非預期的程式碼，因此也要避免將多餘的程式映射進 kernel mode 。
+
+為了減少實做的複雜度，我們這裡會將 user mode 做 system call 的兩個函數編譯在同一個區塊 `.text.user` ，並且要讓這些程式編譯做 4096 bytes 對齊，方便計算 offset 。因此要做相對應的 link 設定：
+```rust
+// oslic/src/thread.rs
+
+#[unsafe(naked)]
+#[unsafe(no_mangle)]
+#[unsafe(link_section = ".text.user")] // new
+/// # Safety
+/// only use when return from a userspace signal handler
+pub unsafe extern "C" fn sig_ret() {
+    naked_asm!(
+        r#"
+        li a7, 11
+        ecall
+        "#
+    )
+}
+
+/// This function invoke exit system call for u mode thread
+#[unsafe(naked)]
+#[unsafe(no_mangle)]
+#[unsafe(link_section = ".text.user")] // new
+pub extern "C" fn u_mode_do_exit(code: isize) -> ! {
+    naked_asm!(
+        r#"
+        li a7, 6
+        ecall
+        "#
+    )
+}
+```
+
+在 linker script 裡面使用 symbol 來記錄 user text 的範圍：
+```linker
+/* link_script.ld */
+
+SECTIONS {
+  ...
+  .text : {
+      /* ... */
+      . = ALIGN(4096);
+      __user_text_start = .;
+      *(.text.user)
+      __user_text_end = .;
+  } > program
+  /* ... */
+}
+```
+
+最後，在建立 user process 時，將這一部分的 text 複製到一個大小為 4096 的 struct ，並且將其餘部分設定為 0。
+
+```rust
+// osclib/src/thread.rs
+
+unsafe extern "C" {
+    pub static __user_text_start: usize;
+    pub static __user_text_end: usize;
+}
+// ...
+impl ThreadControlTable {
+    pub fn new_user_thread(...) -> Self {
+        // ...      
+        let user_text = unsafe {
+            &*ptr::slice_from_raw_parts(
+                &__user_text_start as *const usize as *const u8,
+                (&__user_text_end) as *const usize as usize
+                    - (&__user_text_start) as *const usize as usize,
+            )
+        };
+        // ...
+        let mut user_text_copied: Box<[u8]> = Box::from([0u8; 4096]);
+        user_text_copied[..user_text.len()].copy_from_slice(user_text);
+
+        let user_text_base = vm_mapper
+            .map_file(user_text_copied, virtual_mem::PROT_USER_TEXT)
+            .unwrap();
+
+        // ...
+    }
+}
+```
+
 ### Context Switch and Video player
+
+把前面的內容實做出來之後，要完成這兩個應該不難，因此就不過多贅述了。
 
 ## `mmap`
 
+把前面 `vma` 做好的 mapping API 拿來用就可以了。
+
 ## Page Fault Handler & Demand Paging
+
+在 Exception 裡面，只有名稱裡面有 "Page Fault" 的才是存取 virtual memory 發生的 exception ，也就是 Instruction Page Fault、load page fault 和 store AMO page fault 。在沒有寫 fork 的 copy on write 的情況下，需要做的就是：
+1. 判斷存取的記憶體是否有在 `vm_area` 裡面，如果有則確認是否有做實體映射。如果不在 `vm_area` 範圍裡面就將此 process 結束。
+2. 如果成功完成實體映射，就先 return 。
+3. 如果實體映射已經存在卻仍然發生錯誤，那麼就是存取權限發生錯誤，可以直接結束 process 。
 
 ## Copy on Write
 
+在 fork 時將所有有分配記憶體的 page table entry 改成 read only 讓他們在做儲存時觸發 page fault ，並且在 page fault 時判斷這個已經分配記憶體的 page table entry 的 property 是否與 `vm_area` 裡面記錄的一致，如果缺少了 write 的 bit 就複製舊的 page table entry 到新的 page 裡面，並且 drop 掉舊的 entry 。除此之外，在複製 page table entry 時，需要將其在 page frame 裡面的 reference 數量加一，讓我們在釋放記憶體時要等 reference 數量歸 0 才歸還 page 。
+
 ## 心得
+
+如同前面說的，這一份作業的難點之一就是十分難以除錯，因為當 `satp` 或是 page table 設定錯誤時並不會報錯，如果可以在前期設定一個前期的 interrupt handler 將 page fault 的錯誤值印出來肯定可以降低除錯難度——不過我是在寫完作業之後才知道的，寫作業時只在 debugger 裡面瘋狂設斷點，真的是很苦。另外就是本人見識淺薄能力不足，在做作業時光是搞定 virtual memory 就拼盡了全力，沒有時間再去搞 `vma` 因此在實做 advanced exercise 時繞了很多彎路！看了前面的作業講解應該不難發現，這三個 advanced exercise 基本上就是 `vma`、`mmap` 的延伸應用，只要將 `vma` 相關的 API 做好，後面就是將 API 組合一下就可以了。不過在實做 `vma` 的路上，也多虧了 Rust 提供的 B Tree ，基本上就是不需要多花時間在對資料結構除錯，不敢想象如果用 C 的話會是怎麼樣的一番光景。
