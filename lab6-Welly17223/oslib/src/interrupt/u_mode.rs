@@ -205,24 +205,18 @@ impl InterruptTrait for Interrupt {
                 let prev_regs = unsafe { (regs.sscratch as *const pt_regs).read_volatile() };
                 let curr_sig = &mut current_tcb().sig;
                 let sig_stack = curr_sig.sig_stack.as_ref().unwrap();
-                let sig_stack_buttom = sig_stack.as_ptr() as usize;
-                let sig_stack_top = sig_stack_buttom + sig_stack.len();
+                let sig_stack_buttom = sig_stack.addr();
+                let sig_stack_top = sig_stack_buttom + thread::SIG_STACK_SIZE;
                 drop(save);
 
                 if !(prev_regs.sscratch > sig_stack_buttom && prev_regs.sscratch < sig_stack_top) {
-                    curr_sig.sig_stack.take();
-                    let virt_addr = crate::align(prev_regs.sscratch, virtual_mem::PMD_SIZE)
-                        - virtual_mem::PMD_SIZE;
-                    let pgd = current_tcb()
+                    let stack_top = curr_sig.sig_stack.take().unwrap();
+                    current_tcb()
                         .vm_mapper
                         .as_mut()
                         .unwrap()
-                        .as_mut()
-                        .pgd
-                        .as_mut();
-                    let pmd = pgd
-                        .try_new_entry(virtual_mem::vpn0(virt_addr.into()), virtual_mem::PMD_SHIFT);
-                    pmd[virtual_mem::vpn1(virt_addr.into())] = virtual_mem::PageTableEntry(0);
+                        .unmap(stack_top)
+                        .unwrap();
                 }
 
                 *regs = prev_regs;

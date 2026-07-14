@@ -92,7 +92,7 @@ pub extern "C" fn main(hart_id: u64, dtb_addr: u64) {
 
     // init logginer
     log::set_logger(&logger::LOGGER).unwrap();
-    log::set_max_level(log::LevelFilter::Warn);
+    log::set_max_level(log::LevelFilter::Debug);
 
     if let Some(serial) = unsafe { &mut SERIAL } {
         serial.getc();
@@ -112,7 +112,6 @@ pub extern "C" fn main(hart_id: u64, dtb_addr: u64) {
         timer::get_sec(),
         timer::get_time_raw()
     );
-    info!("memory: {}", ALLOCATOR);
 
     // set uart to async
     if let Some(uart) = unsafe { &mut SERIAL } {

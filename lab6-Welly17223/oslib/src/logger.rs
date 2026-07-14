@@ -8,11 +8,15 @@ pub struct Logger {}
 pub static LOGGER: Logger = Logger {};
 
 impl Log for Logger {
-    fn enabled(&self, _metadata: &log::Metadata) -> bool {
-        false
+    fn enabled(&self, metadata: &log::Metadata) -> bool {
+        !metadata.target().contains("memory_alloc")
     }
 
     fn log(&self, record: &log::Record) {
+        if !self.enabled(record.metadata()) {
+            return;
+        }
+
         extern crate alloc;
         let serial_contaienr = &raw mut uart::SERIAL;
 
