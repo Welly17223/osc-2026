@@ -11,7 +11,7 @@ use crate::virtual_mem::{PGD_SIZE, PTE_V, VirtualAddress};
 
 use super::{PageTable, PageTableEntry};
 
-#[derive(Default, Debug, Clone)]
+#[derive(Default, Debug)]
 pub struct Manager {
     vm_area: BTreeMap<super::VirtualAddress, AreaEntry>,
     vm_free_addr: BTreeMap<VirtualAddress, usize>,
@@ -180,6 +180,49 @@ impl Manager {
         self.map_addr(start, size, flags, backed)
     }
 
+    pub fn unmap(&mut self, addr: VirtualAddress) -> Result<(), Error> {
+        let area_entry = self.vm_area.remove(&addr).ok_or(Error::NotFound)?;
+
+        let drop_pte_f: fn(&mut PageTableEntry) = match area_entry.backed {
+            Provider::Anonymous => |e| {
+                drop(unsafe { Box::from_raw(e.get_pa().into_virt().addr() as *mut u8) });
+                e.clear()
+            },
+            Provider::File(_) => |e| e.clear(),
+        };
+
+        for i in (addr.addr()..addr.addr() + area_entry.size).step_by(0x1000) {
+            if let Some(e) = self.page_entry_mut(i.into()) {
+                drop_pte_f(e);
+            }
+        }
+        let mut hole_start = addr;
+        let mut hole_size = area_entry.size;
+
+        let prev = self.vm_free_addr.range(..addr).next_back();
+
+        if let Some((base, size)) = prev
+            && *base + *size == hole_start
+        {
+            let prev_base = *base;
+            let prev_size = self.remove_hole(&prev_base).unwrap();
+            hole_start = prev_base;
+            hole_size += prev_size;
+        }
+
+        let next = self.vm_free_addr.range(addr..).next();
+        if let Some(next) = next
+            && addr + area_entry.size == *next.0
+        {
+            let next_base = *next.0;
+            let next_size = self.remove_hole(&next_base).unwrap();
+            hole_size += next_size;
+        }
+
+        self.insert_hole(&hole_start, hole_size);
+        Ok(())
+    }
+
     pub fn map_to_phy(&mut self, addr: VirtualAddress) -> Result<(), Error> {
         let (area_addr, area_entry) = self
             .vm_area
@@ -254,6 +297,43 @@ impl Manager {
 impl Drop for Manager {
     fn drop(&mut self) {
         self.pgd.entries[..256].iter_mut().for_each(drop_page_entry);
+    }
+}
+
+impl Clone for Manager {
+    fn clone(&self) -> Self {
+        let mut new_pgd = Box::new(PageTable {
+            entries: self.pgd.entries,
+        });
+
+        new_pgd.entries[..256]
+            .iter_mut()
+            .for_each(clone_page_table_entry);
+
+        Self {
+            vm_area: self.vm_area.clone(),
+            vm_free_addr: self.vm_free_addr.clone(),
+            vm_free_size: self.vm_free_size.clone(),
+            pgd: new_pgd,
+        }
+    }
+}
+
+fn clone_page_table(page_table_slice: &PageTable) -> PageTable {
+    let mut new_entry = page_table_slice.entries;
+    new_entry.iter_mut().for_each(clone_page_table_entry);
+    PageTable { entries: new_entry }
+}
+
+fn clone_page_table_entry(elem: &mut PageTableEntry) {
+    if let Some(leaf) = elem.to_leaf_mut() {
+        let new_elem = Box::from(clone_page_table(leaf));
+        *elem = PageTableEntry::new(
+            VirtualAddress(Box::into_raw(new_elem) as usize).into_phy(),
+            PTE_V,
+        );
+    } else if elem.is_valid() {
+        crate::memory_alloc::ALLOCATOR.increase_ref_count(elem.get_pa().0);
     }
 }
 

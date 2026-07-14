@@ -3,7 +3,10 @@ use core::{
     fmt::LowerHex,
     ops::{Add, BitAnd, Index, IndexMut, Sub},
     panic,
+    slice::SliceIndex,
 };
+
+use riscv::register::satp::{self, Satp};
 
 use crate::align;
 use crate::memory_alloc;
@@ -285,37 +288,13 @@ impl PageTableEntry {
     }
 }
 
-/* impl Drop for PageTable {
-    fn drop(&mut self) {
-        extern crate alloc;
-        use alloc::boxed::Box;
-        if self[256] == unsafe { PGD[256] } {
-            self.entries[..256].iter_mut()
-        } else {
-            self.entries.iter_mut()
-        }
-        .for_each(|elem| {
-            if let Some(leaf) = elem.to_leaf_ref() {
-                drop(unsafe { Box::from_raw(leaf as _) })
-            } else if elem.is_valid() {
-                unsafe {
-                    alloc::alloc::dealloc(
-                        phy_to_virt(elem.get_pa()) as _,
-                        Layout::new::<PageTableEntry>(),
-                    );
-                }
-            }
-        });
-    }
-} */
-
 #[derive(Debug)]
 #[repr(C, align(4096))]
 pub struct PageTable {
     pub entries: [PageTableEntry; ENTRIES_PER_TABLE],
 }
 
-impl Clone for PageTable {
+/* impl Clone for PageTable {
     fn clone(&self) -> Self {
         extern crate alloc;
         use alloc::boxed::Box;
@@ -341,7 +320,7 @@ impl Clone for PageTable {
         pt.add_ref_count();
         pt
     }
-}
+} */
 
 impl Index<usize> for PageTable {
     type Output = PageTableEntry;
@@ -380,14 +359,16 @@ impl PageTable {
         let entry = &mut self[idx];
 
         if !entry.is_leaf() {
+            assert!(!entry.is_valid() || entry.is_set(PTE_G));
             let phy_base = entry.get_pa();
             let curr_prot = entry.get_prop();
 
             let mut new_leaf = Box::new(PageTable::default());
-            new_leaf.iter_mut().enumerate().for_each(|(idx, elem)| {
-                *elem = PageTableEntry::new(phy_base + (idx << shift), curr_prot);
-            });
-
+            if entry.is_valid() {
+                new_leaf.iter_mut().enumerate().for_each(|(idx, elem)| {
+                    *elem = PageTableEntry::new(phy_base + (idx << shift), curr_prot);
+                });
+            }
             let new_pte = Box::into_raw(new_leaf);
             *entry = PageTableEntry::new_leaf(virt_to_phy(VirtualAddress(new_pte as _)));
             unsafe {
@@ -398,33 +379,40 @@ impl PageTable {
         unsafe { &mut *(entry.get_pa().into_virt().addr() as *mut Self) }
     }
 
-    pub fn set_prop_range(&mut self, start: usize, end_eq: usize, prop: usize) {
-        assert!(start <= end_eq);
-        self.entries[start..=end_eq].iter_mut().for_each(|elem| {
+    pub fn set_prop_range<R>(&mut self, range: R, prop: usize)
+    where
+        R: SliceIndex<[PageTableEntry], Output = [PageTableEntry]>,
+    {
+        self.entries[range].iter_mut().for_each(|elem| {
             if let Some(leaf) = elem.to_leaf_mut() {
-                leaf.set_prop_range(0, ENTRIES_PER_TABLE - 1, prop);
+                leaf.set_prop_range(..ENTRIES_PER_TABLE, prop);
             } else if elem.is_valid() {
                 elem.set_prop(prop);
             }
         });
     }
 
-    pub fn add_ref_count(&mut self) {
-        self.entries.iter_mut().for_each(|elem| {
+    pub fn add_ref_count<R>(&mut self, range: R)
+    where
+        R: SliceIndex<[PageTableEntry], Output = [PageTableEntry]>,
+    {
+        self.entries[range].iter_mut().for_each(|elem| {
             if elem.is_leaf() {
                 unsafe { &mut *(elem.get_pa().into_virt().addr() as *mut PageTable) }
-                    .add_ref_count();
+                    .add_ref_count(..);
             } else if elem.is_valid() {
                 memory_alloc::ALLOCATOR.increase_ref_count(elem.get_pa().0);
             }
         });
     }
 
-    pub fn set_fork_prop(&mut self, start: usize, end_eq: usize) {
-        assert!(start <= end_eq);
-        self.entries[start..=end_eq].iter_mut().for_each(|elem| {
+    pub fn set_fork_prop<R>(&mut self, range: R)
+    where
+        R: SliceIndex<[PageTableEntry], Output = [PageTableEntry]>,
+    {
+        self.entries[range].iter_mut().for_each(|elem| {
             if let Some(leaf) = elem.to_leaf_mut() {
-                leaf.set_fork_prop(0, leaf.entries.len() - 1);
+                leaf.set_fork_prop(0..leaf.entries.len());
             } else if elem.is_valid() && elem.is_set(PTE_W) {
                 elem.set_prop(elem.get_prop() & (!PTE_W));
             }
@@ -479,7 +467,7 @@ pub fn root_pgd_clone() -> PageTable {
     };
     pgd_clone.entries[256..].copy_from_slice(&unsafe { &*ptr }.entries[256..]);
 
-    pgd_clone.set_fork_prop(0, 255);
+    pgd_clone.set_fork_prop(0..256);
     pgd_clone
 }
 
@@ -489,53 +477,6 @@ pub fn virt_shift_align(shift: u32) -> u32 {
         t if t <= PTE_SHIFT => PTE_SHIFT,
         t if t <= PMD_SHIFT && t > PTE_SHIFT => PMD_SHIFT,
         _ => PGD_SHIFT,
-    }
-}
-
-pub fn load_user_program(root_pgd: &mut PageTable, user_program: &[u8]) {
-    extern crate alloc;
-    use alloc::boxed::Box;
-    use alloc::vec::Vec;
-    let mut curr_size = 0;
-    let mut curr_shift;
-
-    // move user program to pgd
-    while curr_size < user_program.len() {
-        let left_size = user_program.len() - curr_size;
-        let curr_addr = USER_MODE_START_ADDRESS + curr_size;
-
-        let pte = match left_size {
-            ..PMD_SIZE => {
-                curr_shift = PTE_SHIFT;
-                let pmd = root_pgd.try_new_entry(vpn2(curr_addr), PMD_SHIFT);
-                let pte = pmd.try_new_entry(vpn1(curr_addr), PTE_SHIFT);
-                &mut pte[vpn0(curr_addr)]
-            }
-            PMD_SIZE..PGD_SIZE => {
-                curr_shift = PMD_SHIFT;
-                let pmd = root_pgd.try_new_entry(vpn2(curr_addr), PMD_SHIFT);
-                &mut pmd[vpn1(curr_addr)]
-            }
-            PGD_SIZE.. => {
-                curr_shift = PGD_SHIFT;
-                &mut root_pgd[vpn2(curr_addr)]
-            }
-        };
-
-        let end_size = curr_size + (1 << curr_shift);
-        let page: Box<[u8]> = if end_size > user_program.len() {
-            let mut new_box = Vec::with_capacity(end_size - curr_size);
-            user_program[curr_size..user_program.len()]
-                .iter()
-                .for_each(|i| new_box.push(*i));
-            (user_program.len()..end_size).for_each(|_| new_box.push(0));
-            Box::from(new_box)
-        } else {
-            Box::from(&user_program[curr_size..end_size])
-        };
-        let page_ptr = VirtualAddress(Box::into_raw(page) as *const () as _);
-        *pte = PageTableEntry::new(virt_to_phy(page_ptr), PROT_USER_TEXT);
-        curr_size = end_size;
     }
 }
 
@@ -559,16 +500,10 @@ extern "C" fn init_virtual_memory(dtb_addr: u64, kernel_start: usize, kernel_end
             PageTableEntry::new(PhysicalAddress((dtb_addr as usize) & PGD_MASK), PROT_KERNEL);
     }
 
-    let satp = make_satp(PhysicalAddress(&raw const PGD as _));
     unsafe {
-        asm!(
-            r#"
-            csrw satp, {}
-            sfence.vma
-            "#,
-            in(reg) satp
-        );
+        satp::set(satp::Mode::Sv39, 0, (&raw const PGD as usize) >> 12);
     }
+    riscv::asm::sfence_vma_all();
 }
 
 #[unsafe(no_mangle)]
@@ -627,7 +562,7 @@ pub fn set_memory_prop(phy_base: PhysicalAddress, size: usize, prop: usize) {
         0..PMD_SIZE => {
             let pmd = unsafe { (&mut *pgd_ptr).try_new_entry(vpn2(virt_base), PMD_SHIFT) };
             let pte = pmd.try_new_entry(vpn1(virt_base), PTE_SHIFT);
-            pte.set_prop_range(vpn0(virt_base), vpn0(virt_end), prop);
+            pte.set_prop_range(vpn0(virt_base)..=vpn0(virt_end), prop);
         }
         PMD_SIZE.. => {
             for gb_idx in vpn2(virt_base)..=vpn2(virt_end) {
@@ -652,18 +587,18 @@ pub fn set_memory_prop(phy_base: PhysicalAddress, size: usize, prop: usize) {
                 let pmd = unsafe { (&mut *pgd_ptr).try_new_entry(gb_idx, PMD_SHIFT) };
                 if gb_idx == vpn2(virt_base) && virt_base & (!PMD_MASK) != VirtualAddress(0) {
                     let pte = pmd.try_new_entry(vpn1(virt_base), PTE_SHIFT);
-                    pte.set_prop_range(vpn0(virt_base), ENTRIES_PER_TABLE - 1, prop);
+                    pte.set_prop_range(vpn0(virt_base)..ENTRIES_PER_TABLE, prop);
                     mb_start += 1;
                 }
 
                 if gb_idx == vpn2(virt_end) && virt_end & (!PMD_MASK) != VirtualAddress(0) {
                     let pte = pmd.try_new_entry(vpn1(virt_end), PTE_SHIFT);
-                    pte.set_prop_range(0, vpn0(virt_end), prop);
+                    pte.set_prop_range(..=vpn0(virt_end), prop);
                     mb_end -= 1;
                 }
 
                 if mb_start <= mb_end {
-                    pmd.set_prop_range(mb_start, mb_end, prop);
+                    pmd.set_prop_range(mb_start..=mb_end, prop);
                 }
             }
         } // PGD_SIZE.. => for gb_idx in vpn2(virt_base)..=vpn2(virt_end) {},

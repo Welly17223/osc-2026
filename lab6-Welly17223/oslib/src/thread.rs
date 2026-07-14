@@ -16,6 +16,7 @@ use core::{
     sync::atomic::{self, AtomicU32},
 };
 
+pub const SIG_STACK_SIZE: usize = virtual_mem::PMD_SIZE;
 static ALLOC_PID: AtomicU32 = AtomicU32::new(1);
 
 pub fn alloc_pid() -> u32 {
@@ -51,7 +52,7 @@ pub struct TextArea {
 pub struct SigAct {
     pub sig_mask: u64,
     pub sig_handler_func: [usize; u64::BITS as usize],
-    pub sig_stack: Option<Box<[u8]>>,
+    pub sig_stack: Option<VirtualAddress>,
     pub sig_ret_addr: usize,
 }
 
@@ -329,7 +330,7 @@ impl ThreadControlTable {
 
         let child_vm_mapper = children.vm_mapper.as_mut().unwrap();
         children.context.satp = child_vm_mapper.satp();
-        child_vm_mapper.pgd.set_fork_prop(0, 255);
+        child_vm_mapper.pgd.set_fork_prop(0..256);
 
         children.state = State::Ready;
         children.pid = pid;
