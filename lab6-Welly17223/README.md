@@ -39,13 +39,15 @@ ffffffc280600000 0000000010000000 0000000000200000 rw--gad
 
 ![](https://nycu-caslab.github.io/OSC2026/_images/lab6_sv39.png)
 
-這裡設計有參考 [Redox OS Kernel] ，一個由 Rust 寫成的作業系統，主要是將 [virtual memory area](#補充virtual-memory-area-vma) 以及 physical address 以及 virtual memory 分成兩個 struct ，提供更清晰的語義，並且可以提供各自的轉換 method 或是 virtual memory 需要計算的 virtual page number 等，不過比較麻煩的是需要額外實做加減法等 trait 才能直接參予 `usize` 等整數運算。Page table 以及 Page table entry 額外宣告也是一樣的道理。
+這裡設計有參考 [Redox OS Kernel] ，一個由 Rust 寫成的作業系統，主要是 [virtual memory area](#補充virtual-memory-area-vma) 以及將 virtual memory 和 physical address 以及 virtual memory 分成兩個 struct ，提供更清晰的語義，並且可以提供各自的轉換 method 或是 virtual memory 需要計算的 virtual page number 等，不過比較麻煩的是需要額外實做加減法等 trait 才能直接參予 `usize` 等整數運算。Page table 以及 Page table entry 額外宣告也是一樣的道理。
 
 > 註：為了讓開機的程式可以在 `0xfff_ffc0_0020_0000` 的地方，因此我將 bootloader 改成會 self relocation ，並且將 UART 讀進來的程式寫到 physical address `0x20_0000` 的地方。
 
 [Redox OS Kernel]: https://gitlab.redox-os.org/redox-os/kernel
 
 ```rust
+// oslib/src/virtual_mem/mod.rs
+
 #[derive(Default, Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
 #[repr(transparent)]
 pub struct PhysicalAddress(pub usize);
@@ -62,6 +64,88 @@ pub struct PageTableEntry(pub usize);
 #[repr(C, align(4096))]
 pub struct PageTable {
     pub entries: [PageTableEntry; ENTRIES_PER_TABLE],
+}
+```
+
+### `PageTable` 以及 `PageTableEntry` 的實做細節
+
+如何轉換 virtual memory 以及 physical memory 呢？如果像是 QEMU 的 begin address 是從 `0x8000_0000` ，而 Orange PI 從 0 開始。此時定義一個全域變數，並且在 memory allocator 抓取全局記憶體 layout 時，將其設定為開始位置為排序過後開始位置最小的記憶體，並且在後面使用：
+
+```rust
+#[inline]
+pub fn virt_to_phy(va: VirtualAddress) -> PhysicalAddress {
+    PhysicalAddress(va.addr() - PAGE_OFFSET.addr() + phy_begin())
+}
+```
+
+在 `PagetableEntry` 裡，儲存的 `PPN` 有可能是一個 physical address 指向映射的實體記憶體，也有可能是指向一個 page table ，為了方便確認 entry 裡面儲存的 page 是哪一種，就有了 `to_leaf_ref` 。
+
+```rust
+impl PageTableEntry
+    #[inline]
+    pub fn is_leaf(&self) -> bool {
+        self.0 & PROP_MASK == PTE_V
+    }
+
+    #[inline]
+    pub fn to_leaf_ref(&self) -> Option<&PageTable> {
+        if self.is_leaf() {
+            Some(unsafe { &*(self.get_pa().into_virt().addr() as *const PageTable) })
+        } else {
+            None
+        }
+    }
+}
+```
+
+`try_new_entry` 是在需要為大體積映射的 entry 改成由一個 page table 描述時使用，設計上只能用在 **kernel linear mapping 的區域**、**沒有 mapping 的記憶體位置**或是 **entry 是 page table 的地方**，否則有可能會有 memory leak 。當這個映射是 1 GB 的映射，但是我們需要修改以 2 MB / 4 KB 為單位的記憶體權限時，就可以使用這個函數將大範為映射的 entry 改成指向下一層 level 的 page table 。主要用在設定 reserved memory 的地方以及建立新的 4 KB level 的 page table。
+
+`set_prop_range` 設計上使用泛型 `SliceIndex<[PageTableEntry], Output = [PageTableEntry]>` 讓傳入的值可以是任意範圍描述如 `0..256` 或是 `0..=255` 等。
+
+至於 Clone trait 以及 Drop 等記憶體安全的措施與 User process 有關，將在後面介紹。
+
+```rust
+impl PageTable {
+    pub fn try_new_entry(&mut self, idx: usize, shift: u32) -> &mut Self {
+        extern crate alloc;
+        use alloc::boxed::Box;
+        let entry = &mut self[idx];
+
+        if !entry.is_leaf() {
+            assert!(!entry.is_valid() || entry.is_set(PTE_G));
+            let phy_base = entry.get_pa();
+            let curr_prot = entry.get_prop();
+
+            let mut new_leaf = Box::new(PageTable::default());
+            if entry.is_valid() {
+                new_leaf.iter_mut().enumerate().for_each(|(idx, elem)| {
+                    *elem = PageTableEntry::new(phy_base + (idx << shift), curr_prot);
+                });
+            }
+
+            let new_pte = Box::into_raw(new_leaf);
+            *entry = PageTableEntry::new_leaf(virt_to_phy(VirtualAddress(new_pte as _)));
+            unsafe {
+                asm!("sfence.vma");
+            }
+        }
+
+        unsafe { &mut *(entry.get_pa().into_virt().addr() as *mut Self) }
+    }
+
+    pub fn set_prop_range<R>(&mut self, range: R, prop: usize)
+    where
+        R: SliceIndex<[PageTableEntry], Output = [PageTableEntry]>,
+    {
+        self.entries[range].iter_mut().for_each(|elem| {
+            if let Some(leaf) = elem.to_leaf_mut() {
+                leaf.set_prop_range(..ENTRIES_PER_TABLE, prop);
+            } else if elem.is_valid() {
+                elem.set_prop(prop);
+            }
+        });
+    }
+
 }
 ```
 
@@ -84,7 +168,13 @@ pub fn make_satp(pa: PhysicalAddress) -> usize {
 }
 ```
 
-宣告一個全域變數用來裝 kernel space 的 root page table 。最後記得在寫入 `satp` 之後，需要用 `sfence.vma` 清除 transition look aside buffer 。
+或是用 `riscv` 提供的函數：
+```rust
+use riscv::register::satp;
+satp::set(satp::Mode::Sv39, 0, (&raw const PGD as usize) >> 12);
+```
+
+宣告一個全域變數用來裝 kernel space 的 root page table 。最後記得在寫入 `satp` 之後，需要用 `sfence.vma` 清除 transition look aside buffer 。使用 `sfence.vma {addr}, {asid}` 可以減少 transition look aside buffer 清除的範圍，增加效能，也可以使用 `riscv` crate 包裝的 `riscv::asm::sfence_vma` 以及 `riscv::asm::sfence_vma_all` 來減少手寫 assembly 導致的錯誤。
 
 ### Identity Mapping
 
@@ -137,6 +227,51 @@ pub struct GrantInfo {
 簡單來說<ruby> virtual <rt>v</rt> memory <rt>m</rt> area <rt>a<rt></ruby> 負責的是管理從 `0x0` 到 `0x0000_003f_ffff_ffff` 的使用者記憶體空間，標示了哪些虛擬記憶體地址有映射了以及映射到哪裡，哪些虛擬記憶體位址可用，下圖是 Linux kernel 實做 `vma` 的概念圖。如果沒有要做 advanced exercise ，那麼可以跳過 `vma` ，做起來應該會相對輕鬆許多。不過後面的筆記還是會以實做 `vma` 的前提來介紹。
 
 ![Virtual memory area](https://encrypted-tbn0.gstatic.com/images?q=tbn:ANd9GcQsnUdmr7b1-WcQqLDCEXMO27MON59ZBtYDdqVkb1uvJx2AUY5j7Wnzr2g&s=10)
+
+### 補充：`PageTable` 如何 Clone 以及 Drop
+
+由 `vma` 的管理者管理 `pgd` 的 clone 以及 drop。 在 fork 時會觸發 `vma` 的 clone ，此時 root page table 的 kernel space 部分保持不變，至於 user space 則是如果這個 entry 是指向一個 page table 則遞迴的分配一個新的 page table ，並且複製裡面的 entry 過去，如果這個 entry 指向一個 physical page frame ，那麼則將其 reference count 加一：Drop 的實做方法與 Clone 相似。 
+
+```rust
+// oslib/src/virtual_mem/vm_area.rs
+
+impl Clone for Manager {
+    fn clone(&self) -> Self {
+        let mut new_pgd = Box::new(PageTable {
+            entries: self.pgd.entries,
+        });
+
+        new_pgd.entries[..256]
+            .iter_mut()
+            .for_each(clone_page_table_entry);
+
+        Self {
+            vm_area: self.vm_area.clone(),
+            vm_free_addr: self.vm_free_addr.clone(),
+            vm_free_size: self.vm_free_size.clone(),
+            pgd: new_pgd,
+        }
+    }
+}
+
+fn clone_page_table(page_table_slice: &PageTable) -> PageTable {
+    let mut new_entry = page_table_slice.entries;
+    new_entry.iter_mut().for_each(clone_page_table_entry);
+    PageTable { entries: new_entry }
+}
+
+fn clone_page_table_entry(elem: &mut PageTableEntry) {
+    if let Some(leaf) = elem.to_leaf_mut() {
+        let new_elem = Box::from(clone_page_table(leaf));
+        *elem = PageTableEntry::new(
+            VirtualAddress(Box::into_raw(new_elem) as usize).into_phy(),
+            PTE_V,
+        );
+    } else if elem.is_valid() {
+        crate::memory_alloc::ALLOCATOR.increase_ref_count(elem.get_pa().0);
+    }
+}
+```
 
 ### PGD Allocation
 
@@ -270,6 +405,8 @@ impl ThreadControlTable {
     }
 }
 ```
+
+至於 signal stack 的部分就交給<ruby> `vma` 的 `map` API <rt>無敵的白金之星</rt></ruby>處理就好了。  
 
 ### Context Switch and Video player
 
