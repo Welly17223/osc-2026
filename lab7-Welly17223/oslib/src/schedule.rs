@@ -13,13 +13,15 @@ use core::{
 
 use crate::{
     file_system,
-    interrupt::timer,
-    interrupt::{self, timer::Time},
+    interrupt::{
+        self,
+        timer::{self, Time},
+    },
     kernel_shell,
     spinlock::SpinLock,
-    thread::alloc_pid,
-    thread::{self, Context, State, ThreadControlTable},
-    uart, virtual_mem,
+    thread::{self, Context, State, ThreadControlTable, alloc_pid},
+    uart,
+    virtual_mem::{self, VirtualAddress},
 };
 
 pub type SafeSendTCB = Arc<SpinLock<ThreadControlTable>>;
@@ -90,7 +92,8 @@ pub struct WaitPidQueue {
 impl WaitPidQueue {
     pub fn push_current(&mut self, pid: u32) {
         let tcb_arc = curr_thread_arc();
-        let tcb = current_tcb();
+        let tcb_lock = tcb_arc.lock();
+        let tcb = tcb_lock.get_mut();
 
         if tcb.term_children.contains_key(&pid) {
             return;
@@ -99,6 +102,7 @@ impl WaitPidQueue {
         if tcb.state == State::Running {
             tcb.state = State::Waiting;
         }
+        drop(tcb_lock);
 
         self.queue.insert(pid, tcb_arc);
     }
@@ -155,12 +159,12 @@ pub fn init() {
             ra: 0,
             sp: 0,
             s: [0; 12],
-            satp: virtual_mem::make_satp(virtual_mem::virt_to_phy(
-                { &raw const virtual_mem::PGD } as _
-            )),
+            satp: virtual_mem::make_satp(
+                VirtualAddress({ &raw const virtual_mem::PGD } as _).into_phy(),
+            ),
         },
         state: State::Running,
-        pgd: None,
+        vm_mapper: None,
         pid: boot_pid,
         exit_code: 0,
         kernel_stack: Box::new([0; 1]),
@@ -168,14 +172,12 @@ pub fn init() {
         term_children: Box::new(BTreeMap::new()),
         parent: None,
         ppid: 1,
-        user_init_sp: 0,
-        mmap_start_addr: 0,
+        user_init_sp: 0usize.into(),
         awake_time: 0,
         reschedule: false,
         sig: Box::new(thread::SigAct::default()),
         cwd: file_system::ROOT.get().unwrap().root().unwrap(),
         fdt: file_system::FileDescribeTable::default(),
-        text_file: None,
     }));
 
     let boot_tcb_ptr = boot_idle_thread.as_ref().lock().get() as *const _ as usize;
@@ -317,20 +319,8 @@ pub fn schedule() {
     let thread_queue = unsafe { &mut *thread_queue_ptr }.as_mut().unwrap();
     let curr_process_ptr = &raw mut CURR_THREAD;
 
-    let curr_process_arc = match unsafe { &mut *(curr_process_ptr) }.take() {
-        Some(p) => p,
-        None => {
-            let idle = &raw const IDLE_THREAD_TCB;
-            if let Some(idle) = unsafe { &*idle } {
-                idle.clone()
-            } else {
-                return;
-            }
-        }
-    };
-    let Some(curr_process_lock) = curr_process_arc.try_lock() else {
-        panic!("Locked!");
-    };
+    let curr_process_arc = unsafe { &mut *(curr_process_ptr) }.take().unwrap();
+    let curr_process_lock = curr_process_arc.lock();
     let curr_process = curr_process_lock.get_mut();
     let curr_process_ptr = curr_process as *const _;
 
@@ -357,7 +347,7 @@ pub fn schedule() {
                 child_thread.ppid = init_thread.pid;
                 child_thread.parent = Some(init_thread_arc.clone());
 
-                // writeln!(uart::get_serial(), "move orphan {} parent to init!", pid).unwrap();
+                writeln!(uart::get_serial(), "move orphan {} parent to init!", pid).unwrap();
 
                 init_thread.children.insert(*pid, child.clone());
 
@@ -396,6 +386,9 @@ pub fn schedule() {
 
                 get_process_ready_queue_mut().push_back(thread);
             }
+
+            // drop memory
+            drop(curr_process.vm_mapper.take());
         }
         _ => {}
     }

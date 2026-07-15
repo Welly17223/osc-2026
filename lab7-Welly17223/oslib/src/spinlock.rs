@@ -61,18 +61,6 @@ impl<T> SpinLock<T> {
         }
     }
 
-    pub fn try_lock(&self) -> Option<SpinGuard<'_, T>> {
-        if self.lock.load(atomic::Ordering::SeqCst) {
-            None
-        } else {
-            Some(SpinGuard {
-                lock: self,
-                _disable_interrupt: interrupt::SModeInterrupt::new(),
-                _marker: PhantomData,
-            })
-        }
-    }
-
     /// # Safety
     /// You must known what you are doing
     pub unsafe fn unlock(&self) {

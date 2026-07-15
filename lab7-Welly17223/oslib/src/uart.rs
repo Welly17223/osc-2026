@@ -3,7 +3,7 @@
 extern crate alloc;
 
 use crate::{
-    file_system::{Vfs, VfsError, byte_device},
+    file_system::{VfsError, byte_device},
     interrupt::{self, SModeInterrupt, SetStatusSUM, plic},
     schedule::{current_state, get_process_ready_queue_mut, schedule},
     thread::{self, State, ThreadQueue},
@@ -153,11 +153,11 @@ pub fn init_serial(dtb_addr: *const u8) {
         Ok((ptr, _len)) => unsafe { *(ptr as *const u32) }.swap_bytes(),
         Err(_) => todo!(),
     };
-    let uart_virt_base = virtual_mem::io_remap(uart_base, 4096);
+    let uart_virt_base = virtual_mem::io_remap(uart_base.into(), 4096);
     let def_uart = match uart_compatible {
         // Qemu
         s if s.contains("ns16550a") || s.contains("pxa-uart") => {
-            Uart::new(uart_virt_base, uart_shift)
+            Uart::new(uart_virt_base.addr(), uart_shift)
         }
         _ => unimplemented!(),
     };
@@ -191,14 +191,14 @@ impl Default for RingBuf {
 impl RingBuf {
     fn push_ch<T: Into<u8>>(&mut self, ch: T) {
         let ch = ch.into();
-        if self.size.load(Ordering::SeqCst) < self.output_queue.len() {
+        if self.size.load(Ordering::Relaxed) < self.output_queue.len() {
             let tail = self.tail.load(Ordering::Relaxed);
             self.output_queue[tail] = ch;
             self.tail.store(
                 (tail + 1) & (self.output_queue.len() - 1),
                 Ordering::Relaxed,
             );
-            self.size.fetch_add(1, Ordering::SeqCst);
+            self.size.fetch_add(1, Ordering::Relaxed);
         }
     }
 
@@ -210,7 +210,7 @@ impl RingBuf {
                 (head + 1) & (self.output_queue.len() - 1),
                 Ordering::Relaxed,
             );
-            self.size.fetch_sub(1, Ordering::SeqCst);
+            self.size.fetch_sub(1, Ordering::Relaxed);
             Some(ch)
         } else {
             None
@@ -218,11 +218,11 @@ impl RingBuf {
     }
 
     fn is_empty(&self) -> bool {
-        self.size.load(Ordering::SeqCst) == 0
+        self.size.load(Ordering::Relaxed) == 0
     }
 
     fn is_full(&self) -> bool {
-        self.size.load(Ordering::SeqCst) >= self.output_queue.len()
+        self.size.load(Ordering::Relaxed) >= self.output_queue.len()
     }
 
     fn new() -> Self {
@@ -369,6 +369,7 @@ impl Uart {
     }
 
     pub fn push_tx<T: AsRef<[u8]>>(&mut self, s: T) {
+        let _disable_interrupt = SModeInterrupt::new();
         let _sstatus_sum = SetStatusSUM::new();
         unsafe {
             let mut ier = self.ier().read_volatile();
@@ -394,6 +395,9 @@ impl Uart {
         let Some(txq) = &mut self.tx_queue else {
             return;
         };
+        if s == b'\n' {
+            txq.push_ch(b'\r');
+        }
         while txq.is_full() {
             if current_state() == State::Running {
                 get_tx_thread_queue().push_current();

@@ -12,6 +12,10 @@ SECTIONS {
   .text : {
       *(.text.boot)
       *(.text)
+      . = ALIGN(4096);
+      __user_text_start = .;
+      *(.text.user)
+      __user_text_end = .;
   } > program
 
   .data : {

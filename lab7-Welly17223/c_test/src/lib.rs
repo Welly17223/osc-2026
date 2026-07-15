@@ -3,10 +3,9 @@ use core::alloc::{GlobalAlloc, Layout};
 use core::ffi::c_void;
 use core::fmt::Write;
 use core::result::Result::Ok;
-use core::{ffi, mem, ptr};
+use core::{ffi, mem};
 
-use log::info;
-use oslib::interrupt::timer::{self, get_sec, get_time_raw};
+use oslib::interrupt::timer::{self};
 use oslib::memory_alloc::ALLOCATOR;
 use oslib::uart::SERIAL;
 
@@ -14,7 +13,7 @@ unsafe extern "C" {
     pub fn test_alloc_1();
     pub fn test_addtask();
     fn test_task_cb(args: *const ffi::c_void);
-    fn test_task_cb1(args: *const ffi::c_void);
+    // fn test_task_cb1(args: *const ffi::c_void);
     pub fn test_func(args: *const u8);
 }
 
@@ -33,6 +32,7 @@ pub extern "C" fn allocate(size: ffi::c_ulong) -> *mut u8 {
 }
 
 #[unsafe(no_mangle)]
+/// # Safety
 pub unsafe extern "C" fn free(ptr: *mut u8) {
     unsafe {
         ALLOCATOR.dealloc(ptr, Layout::new::<usize>());
@@ -40,6 +40,7 @@ pub unsafe extern "C" fn free(ptr: *mut u8) {
 }
 
 #[unsafe(no_mangle)]
+/// # Safety
 pub unsafe extern "C" fn uart_puts(s: *const ffi::c_char) {
     let serial = &raw mut SERIAL;
     let Some(serial) = (unsafe { &mut *serial }) else {
@@ -52,6 +53,7 @@ pub unsafe extern "C" fn uart_puts(s: *const ffi::c_char) {
 }
 
 #[unsafe(no_mangle)]
+/// # Safety
 pub unsafe extern "C" fn uart_hex(s: ffi::c_long) {
     let serial = &raw mut SERIAL;
     let Some(serial) = (unsafe { &mut *serial }) else {
@@ -61,6 +63,7 @@ pub unsafe extern "C" fn uart_hex(s: ffi::c_long) {
 }
 
 #[unsafe(no_mangle)]
+/// # Safety
 pub unsafe extern "C" fn uart_putc(s: ffi::c_char) {
     let serial = &raw mut SERIAL;
     let Some(serial) = (unsafe { &mut *serial }) else {
@@ -70,6 +73,7 @@ pub unsafe extern "C" fn uart_putc(s: ffi::c_char) {
 }
 
 #[unsafe(no_mangle)]
+/// # Safety
 pub unsafe extern "C" fn add_task(
     callback: unsafe extern "C" fn(*const ffi::c_void),
     args: *const ffi::c_void,

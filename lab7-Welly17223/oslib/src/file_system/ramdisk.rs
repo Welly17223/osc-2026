@@ -7,11 +7,13 @@ use super::{
     VnodeOps, VnodeType, Weak,
 };
 
+#[allow(unused)]
 struct Content<'a> {
     name: &'a str,
     data: &'a [u8],
 }
 
+#[allow(unused)]
 struct Dir {
     pub base_addr: usize,
     pub data: RwLock<BTreeMap<String, Arc<super::Vnode>>>,

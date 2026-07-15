@@ -5,7 +5,7 @@ use core::fmt::Write;
 
 use crate::{
     fdt::{self, DTB_ADDR},
-    file_system::{self, OpenFlags, VfsError, VnodeType},
+    file_system::{self, VfsError, VnodeType},
     interrupt::{
         self,
         timer::{self, get_time_raw},
@@ -15,7 +15,6 @@ use crate::{
     schedule::{self, current_tcb},
     thread::{self, ThreadControlTable},
     uart::{self, SERIAL},
-    virtual_mem,
 };
 
 struct TimerArgs {
@@ -187,30 +186,8 @@ pub fn control_input() {
                 fdt::dump_tree(dtb_addr);
             }
             "cat" if n_args > 1 => {
-                let vfs = file_system::ROOT.get().unwrap();
-
-                for file in cmds[1..].iter() {
-                    let Ok(mut f) = vfs.open(file, OpenFlags::from("r")) else {
-                        continue;
-                    };
-
-                    writeln!(serial, "{file}:").unwrap();
-                    loop {
-                        let mut buf = [0u8; 32];
-                        match f.read(&mut buf) {
-                            Err(e) => write!(serial, "{e:?}").unwrap(),
-                            Ok(0) => break,
-                            Ok(n) => match str::from_utf8(&buf[..n]) {
-                                Ok(s) => write!(serial, "{s}").unwrap(),
-                                Err(e) => {
-                                    write!(serial, "UTF8 parse error: {e:?}").unwrap();
-                                    break;
-                                }
-                            },
-                        };
-                    }
-
-                    writeln!(serial).unwrap();
+                if let Err(CatError::FileNotFound) = ramdisk::cat(linux_initrd_start, cmds[1]) {
+                    writeln!(serial, "File '{}' not fmound", cmds[1]).unwrap();
                 }
             }
             "addtask" => {
@@ -278,36 +255,14 @@ pub fn control_input() {
 
                 if let Ok(file) = vfs.open(cmds[1], file_system::OpenFlags::from("r")) {
                     let _disable_interrupt = interrupt::SModeInterrupt::new();
-                    const THREAD_STACK_SIZE: usize = 0x10000;
-
-                    let mut prog_regs = interrupt::pt_regs::default();
-
-                    prog_regs.sepc = virtual_mem::USER_MODE_START_ADDRESS as usize;
-                    // spie
-                    prog_regs.sstatus = riscv::register::sstatus::read().bits();
-                    prog_regs.sstatus |= 1 << 5;
-                    // spp
-                    prog_regs.sstatus &= !(1 << 8);
-                    writeln!(serial, "will exec: {} at {:#x}", cmds[1], prog_regs.sepc,).unwrap();
 
                     let current_pid = current_tcb().pid;
-                    let proc = thread::ThreadControlTable::new_user_thread(
-                        file,
-                        prog_regs.sepc as _,
-                        current_pid,
-                    );
+                    let proc =
+                        thread::ThreadControlTable::new_user_thread(file, 0 as _, current_pid);
                     let pid = ThreadControlTable::create_thread(proc);
-
-                    /* let pid = thread::ThreadControlTable::create(
-                        prog_regs.sepc as _,
-                        current_pid,
-                        prog_regs.sstatus,
-                    ); */
 
                     let exit_code = schedule::kwait_pid(pid);
                     writeln!(serial, "pid: {pid} exit code: {exit_code}").unwrap();
-                } else {
-                    writeln!(serial, "file {} not found", cmds[1]).unwrap();
                 }
             }
             "sstate" => {

@@ -2,7 +2,7 @@ use core::ptr;
 
 use crate::{
     fdt::{self},
-    virtual_mem,
+    virtual_mem::{self, VirtualAddress},
 };
 
 const ENABLE: usize = 0x002080;
@@ -34,7 +34,7 @@ pub fn init_plic(dtb_addr: *mut u8, hart_id: usize) -> Result<(), crate::fdt::Er
     let (res, _) = crate::fdt::getprop(dtb_addr, n, "reg")?;
     let (plic_phy_base, plic_len) = fdt::read_reg(res as _);
 
-    let plic_virt_base = virtual_mem::io_remap(plic_phy_base as _, plic_len as _);
+    let plic_virt_base = virtual_mem::io_remap(plic_phy_base.into(), plic_len as _);
     let plic = PLIC {
         base: plic_virt_base,
     };
@@ -49,7 +49,7 @@ pub fn init_plic(dtb_addr: *mut u8, hart_id: usize) -> Result<(), crate::fdt::Er
 }
 
 pub struct PLIC {
-    base: usize,
+    base: VirtualAddress,
 }
 
 pub enum BitOp {
@@ -59,25 +59,25 @@ pub enum BitOp {
 
 impl PLIC {
     pub fn claim(&self, hart_id: usize) -> u32 {
-        unsafe { ((self.base + CLAIM + hart_id * 0x2000) as *const u32).read_volatile() }
+        unsafe { ((self.base + CLAIM + hart_id * 0x2000).addr() as *const u32).read_volatile() }
     }
 
     pub fn complete<T: Into<u32>>(&self, hart_id: usize, irq: T) {
         unsafe {
-            ((self.base + CLAIM + hart_id * 0x2000) as *mut u32).write_volatile(irq.into());
+            ((self.base + CLAIM + hart_id * 0x2000).addr() as *mut u32).write_volatile(irq.into());
         };
     }
 
     pub fn set_priority<T: Into<u32>>(&self, irq: T, priority: u32) {
         unsafe {
-            (self.base as *mut u32)
+            (self.base.addr() as *mut u32)
                 .wrapping_add(irq.into() as usize)
                 .write_volatile(priority);
         };
     }
 
     pub fn enable(&self, hart_id: usize, bit_idx: usize) {
-        let m = (self.base as *mut u32)
+        let m = (self.base.addr() as *mut u32)
             .wrapping_byte_add(ENABLE + hart_id * 0x100)
             .wrapping_add(bit_idx / 32);
         unsafe {
@@ -89,11 +89,11 @@ impl PLIC {
 
     pub fn set_threshold(&self, hart_id: usize, thres: u32) {
         unsafe {
-            ((self.base + THRESHOLD + hart_id * 0x2000) as *mut u32).write_volatile(thres);
+            ((self.base + THRESHOLD + hart_id * 0x2000).addr() as *mut u32).write_volatile(thres);
         };
     }
 
-    pub fn get_base(&self) -> usize {
+    pub fn get_base(&self) -> VirtualAddress {
         self.base
     }
 }

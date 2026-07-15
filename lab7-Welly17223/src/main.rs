@@ -2,18 +2,24 @@
 #![no_main]
 extern crate alloc;
 
-use core::arch::asm;
-use core::str;
-use core::{arch::global_asm, panic::PanicInfo};
+use core::{
+    arch::{asm, global_asm},
+    panic::PanicInfo,
+};
 
 use log::{info, trace, warn};
-use oslib::interrupt::{self, timer};
-use oslib::memory_alloc::ALLOCATOR;
-use oslib::ramdisk::{Cpio, INITRD_START};
-use oslib::thread::idle_thread;
-use oslib::uart::{self, SERIAL, Uart};
-use oslib::{display, file_system};
-use oslib::{fdt, logger, platform, schedule, virtual_mem};
+
+use oslib::{
+    display, fdt, file_system,
+    interrupt::{self, timer},
+    logger,
+    memory_alloc::ALLOCATOR,
+    ramdisk::{Cpio, INITRD_START},
+    schedule,
+    thread::idle_thread,
+    uart::{self, SERIAL},
+    virtual_mem,
+};
 
 global_asm!(include_str!("start.s"));
 
@@ -24,24 +30,6 @@ compile_error!(
 
 #[cfg(not(any(feature = "qemu", feature = "orangePI")))]
 compile_error!("You must specify a target platform feature: `qemu` or `orangePI`.");
-
-enum Key {
-    Up,
-    Down,
-    Clear,
-}
-
-impl Key {
-    pub fn to_str(&self) -> &'static str {
-        match self {
-            Self::Up => "\x1b[A",
-            Self::Down => "\x1b[B",
-            Self::Clear => "\x1b[2K",
-        }
-    }
-}
-
-static mut DTB_ADDR: usize = 0;
 
 #[allow(static_mut_refs)]
 #[unsafe(no_mangle)]
@@ -85,7 +73,7 @@ pub extern "C" fn main(hart_id: u64, dtb_addr: u64) {
 
     // init logginer
     log::set_logger(&logger::LOGGER).unwrap();
-    log::set_max_level(log::LevelFilter::Warn);
+    log::set_max_level(log::LevelFilter::Debug);
 
     if let Some(serial) = unsafe { &mut SERIAL } {
         serial.getc();
@@ -97,6 +85,14 @@ pub extern "C" fn main(hart_id: u64, dtb_addr: u64) {
     info!("Test info");
     warn!("Test warn");
     log::error!("Test error");
+
+    info!("Stack buttom: {:#x}", stack_buttom);
+    info!("start at hart: {hart_id}");
+    info!(
+        "frequency: {}, curr_time: {}",
+        timer::get_sec(),
+        timer::get_time_raw()
+    );
 
     // set uart to async
     if let Some(uart) = unsafe { &mut SERIAL } {
@@ -114,16 +110,14 @@ pub extern "C" fn main(hart_id: u64, dtb_addr: u64) {
         Err(_) => return,
     };
     unsafe {
-        INITRD_START = virtual_mem::phy_to_virt(linux_initrd_start as usize);
+        INITRD_START = virtual_mem::phy_to_virt((linux_initrd_start as usize).into()).addr();
     }
-
     display::init_display();
-
     file_system::init_vfs();
     schedule::init();
-    interrupt::s_mode_interrupt_enable();
 
     // timer::add_timer::<u8>(timer::Time::new(5, TimeUnit::Sec), boot_func, None, true);
+    interrupt::s_mode_interrupt_enable();
 
     idle_thread();
 }
