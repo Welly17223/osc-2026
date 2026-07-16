@@ -357,11 +357,11 @@ pub extern "C" fn u_mode_do_exit(code: isize) -> ! {
 ```
 
 在 linker script 裡面使用 symbol 來記錄 user text 的範圍：
-```linker
+```ld
 /* link_script.ld */
 
 SECTIONS {
-  ...
+  /* ... */
   .text : {
       /* ... */
       . = ALIGN(4096);
