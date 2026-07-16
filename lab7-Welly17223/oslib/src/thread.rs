@@ -3,7 +3,6 @@ use crate::{
     file_system::{self, OpenFlags},
     interrupt::{self, pt_regs},
     schedule::{self, curr_thread_arc},
-    spinlock::SpinLock,
     virtual_mem::{
         self, VirtualAddress,
         vm_area::{self, Provider},
@@ -19,6 +18,7 @@ use core::{
     ptr,
     sync::atomic::{self, AtomicU32},
 };
+use spin::Mutex;
 
 pub const SIG_STACK_SIZE: usize = virtual_mem::PMD_SIZE;
 static ALLOC_PID: AtomicU32 = AtomicU32::new(1);
@@ -106,8 +106,8 @@ pub enum State {
 pub fn idle_thread() -> ! {
     let init_arc = schedule::get_init_thread();
     loop {
-        let lock = init_arc.lock();
-        lock.get_mut().term_children.clear();
+        let mut lock = init_arc.lock();
+        lock.term_children.clear();
         drop(lock);
 
         let disable = crate::interrupt::SModeInterrupt::new();
@@ -167,7 +167,7 @@ pub extern "C" fn u_mode_do_exit(code: isize) -> ! {
 #[unsafe(no_mangle)]
 pub extern "C" fn do_exit(code: isize) -> ! {
     let arc = curr_thread_arc();
-    unsafe { arc.unlock() };
+    unsafe { arc.force_unlock() };
     drop(arc);
     // Make sure to drop the lock before kill the task
     let curr_tcb = schedule::current_tcb();
@@ -313,23 +313,17 @@ impl ThreadControlTable {
     pub fn create(func: *const (), ppid: u32, sstatus: usize) -> u32 {
         let thread = Self::new_kernel_thread(func, ppid, sstatus);
         let pid = thread.pid;
-        let thread = Arc::new(SpinLock::new(thread));
+        let thread = Arc::new(Mutex::new(thread));
         schedule::get_process_ready_queue_mut().push_back(thread.clone());
-        schedule::get_live_proc()
-            .lock()
-            .get_mut()
-            .insert(pid, thread);
+        schedule::get_live_proc().lock().insert(pid, thread);
         pid
     }
 
     pub fn create_thread(thread: Self) -> u32 {
         let pid = thread.pid;
-        let thread = Arc::new(SpinLock::new(thread));
+        let thread = Arc::new(Mutex::new(thread));
         schedule::get_process_ready_queue_mut().push_back(thread.clone());
-        schedule::get_live_proc()
-            .lock()
-            .get_mut()
-            .insert(pid, thread);
+        schedule::get_live_proc().lock().insert(pid, thread);
         pid
     }
 
@@ -363,12 +357,11 @@ impl ThreadControlTable {
             (children.context.sp as *mut interrupt::pt_regs).write(children_regs);
         }
 
-        let children = Arc::new(SpinLock::new(children));
+        let children = Arc::new(Mutex::new(children));
 
         self.children.insert(pid, children.clone());
         schedule::get_live_proc()
             .lock()
-            .get_mut()
             .insert(pid, children.clone());
         schedule::get_process_ready_queue_mut().push_back(children);
 
@@ -461,19 +454,18 @@ pub unsafe extern "C" fn sig_ret() {
 
 #[derive(Default)]
 pub struct WaitQueue {
-    queue: alloc::collections::VecDeque<Weak<SpinLock<ThreadControlTable>>>,
+    queue: alloc::collections::VecDeque<Weak<Mutex<ThreadControlTable>>>,
 }
 
 impl ThreadQueue for WaitQueue {
     fn push_current(&mut self) {
         let tcb_arc = schedule::curr_thread_arc();
-        let tcb_lock = tcb_arc.lock();
-        let tcb = tcb_lock.get_mut();
+        let mut tcb = tcb_arc.lock();
 
         if tcb.state == State::Running {
             tcb.state = State::Waiting;
         }
-        drop(tcb_lock);
+        drop(tcb);
 
         self.queue.push_back(Arc::downgrade(&tcb_arc));
     }

@@ -133,20 +133,20 @@ impl InterruptTrait for Interrupt {
             }
             SModeInterruptEnum::WaitPID => {
                 let pid = regs.a0 as _;
-                let lock = schedule::get_waitpid_queue_mut().lock();
-                lock.get_mut().push_current(pid);
+                let mut lock = schedule::get_waitpid_queue_mut().lock();
+                lock.push_current(pid);
                 drop(lock);
                 writeln!(uart::get_serial(), "{} wait for {}", current_pid(), pid).unwrap();
 
                 schedule::schedule();
 
                 let arc = schedule::curr_thread_arc();
-                let lock = arc.lock();
-                lock.get_mut().children.remove(&pid);
+                let mut lock = arc.lock();
+                lock.children.remove(&pid);
 
-                let term_queue = &mut lock.get_mut().term_children;
+                let term_queue = &mut lock.term_children;
                 let children = term_queue.remove(&pid).unwrap();
-                regs.a0 = children.lock().get().exit_code as _;
+                regs.a0 = children.lock().exit_code as _;
             }
             SModeInterruptEnum::Exit => {
                 let exit_code = regs.a0 as _;
@@ -155,11 +155,10 @@ impl InterruptTrait for Interrupt {
             }
             SModeInterruptEnum::Stop => {
                 let target_pid = regs.a0 as _;
-                let lock = schedule::get_live_proc().lock();
-                let live_thread = lock.get_mut();
+                let live_thread = schedule::get_live_proc().lock();
 
                 regs.a0 = if let Some(target) = live_thread.get(&target_pid) {
-                    target.lock().get_mut().state = thread::State::Terminate;
+                    target.lock().state = thread::State::Terminate;
                     0
                 } else {
                     -1_isize as _
@@ -172,8 +171,7 @@ impl InterruptTrait for Interrupt {
                 let delay_usec = regs.a0;
 
                 let current_process = schedule::curr_thread_arc();
-                let lock = current_process.lock();
-                let curr_proc = lock.get_mut();
+                let mut curr_proc = current_process.lock();
 
                 if curr_proc.state == thread::State::Running {
                     curr_proc.state = thread::State::Waiting;
@@ -181,18 +179,17 @@ impl InterruptTrait for Interrupt {
                     let wait_usec: fn(*const u8) = |t: *const u8| {
                         let proc_box: Box<schedule::SafeSendTCB> =
                             unsafe { Box::from_raw(t as *mut _) };
-                        let lock = proc_box.lock();
-                        let proc = lock.get_mut();
 
+                        let mut proc = proc_box.lock();
                         if proc.state == thread::State::Waiting {
                             proc.state = thread::State::Ready;
                         }
+                        drop(proc);
 
-                        drop(lock);
                         schedule::get_process_ready_queue_mut().push_back(*proc_box);
                     };
 
-                    drop(lock);
+                    drop(curr_proc);
                     let args = Box::new(current_process);
 
                     timer::add_timer(
@@ -248,12 +245,11 @@ impl InterruptTrait for Interrupt {
                     -1_isize as _
                 } else {
                     let live_proc_lock = schedule::get_live_proc().lock();
-                    let live_proc_map = live_proc_lock.get_mut();
+                    let mut live_proc_map = live_proc_lock;
 
                     match live_proc_map.get_mut(&target_pid) {
                         Some(t) => {
-                            let lock = t.lock();
-                            let proc = lock.get_mut();
+                            let mut proc = t.lock();
                             proc.sig.sig_mask |= 1 << target_sig;
                             0
                         }

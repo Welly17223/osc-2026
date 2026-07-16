@@ -2,6 +2,8 @@
 
 extern crate alloc;
 
+use spin::Once;
+
 use crate::{
     file_system::{VfsError, byte_device},
     interrupt::{self, SModeInterrupt, SetStatusSUM, plic},
@@ -52,18 +54,20 @@ impl From<Offset> for usize {
 }
 
 pub static mut SERIAL: Option<Uart> = None;
-pub static mut RX_THREAD_QUEUE: Option<thread::WaitQueue> = None;
-pub static mut TX_THREAD_QUEUE: Option<thread::WaitQueue> = None;
+pub static mut RX_THREAD_QUEUE: Once<thread::WaitQueue> = Once::new();
+pub static mut TX_THREAD_QUEUE: Once<thread::WaitQueue> = Once::new();
 
 fn get_rx_thread_queue() -> &'static mut thread::WaitQueue {
-    match unsafe { &mut *(&raw mut RX_THREAD_QUEUE) } {
+    let ptr = &raw mut RX_THREAD_QUEUE;
+    match unsafe { &mut *ptr }.get_mut() {
         Some(t) => t,
         None => panic!("Not initialize"),
     }
 }
 
 fn get_tx_thread_queue() -> &'static mut thread::WaitQueue {
-    match unsafe { &mut *(&raw mut TX_THREAD_QUEUE) } {
+    let ptr = &raw mut TX_THREAD_QUEUE;
+    match unsafe { &mut *ptr }.get_mut() {
         Some(t) => t,
         None => panic!("Not initialize"),
     }
@@ -167,10 +171,12 @@ pub fn init_serial(dtb_addr: *const u8) {
     };
     let _ = table.insert(uart_irq, crate::interrupt::plic::IRQ::UART);
 
+    let rx_thread_queue_ptr = &raw mut RX_THREAD_QUEUE;
+    let tx_thread_queue_ptr = &raw mut TX_THREAD_QUEUE;
     unsafe {
         SERIAL = Some(def_uart);
-        RX_THREAD_QUEUE = Some(thread::WaitQueue::default());
-        TX_THREAD_QUEUE = Some(thread::WaitQueue::default());
+        (&*rx_thread_queue_ptr).call_once(thread::WaitQueue::default);
+        (&*tx_thread_queue_ptr).call_once(thread::WaitQueue::default);
     }
 }
 
@@ -421,12 +427,11 @@ impl Uart {
         let res = txq.pop();
 
         if let Some(entry_arc) = get_tx_thread_queue().pop() {
-            let entry_lock = entry_arc.lock();
-            let entry = entry_lock.get_mut();
+            let mut entry = entry_arc.lock();
             if entry.state == State::Waiting {
                 entry.state = State::Ready;
             }
-            drop(entry_lock);
+            drop(entry);
 
             get_process_ready_queue_mut().push_back(entry_arc);
         } else if txq.is_empty() {
@@ -443,13 +448,12 @@ impl Uart {
         rxq.push_ch(c);
 
         if let Some(entry_arc) = get_rx_thread_queue().pop() {
-            let entry_lock = entry_arc.lock();
-            let entry = entry_lock.get_mut();
+            let mut entry = entry_arc.lock();
             if entry.state == State::Waiting {
                 entry.state = State::Ready;
             }
 
-            drop(entry_lock);
+            drop(entry);
             get_process_ready_queue_mut().push_back(entry_arc);
         }
     }

@@ -5,12 +5,11 @@ use core::fmt::Write;
 
 use crate::{
     fdt::{self, DTB_ADDR},
-    file_system::{self, VfsError, VnodeType},
+    file_system::{self, OpenFlags, VfsError, VnodeType},
     interrupt::{
         self,
         timer::{self, get_time_raw},
     },
-    ramdisk::{self, CatError, Cpio, INITRD_START},
     sbi,
     schedule::{self, current_tcb},
     thread::{self, ThreadControlTable},
@@ -59,7 +58,6 @@ pub fn control_input() {
         let Some(serial) = (unsafe { &mut *serial_ptr }) else {
             panic!("not initilized");
         };
-        let linux_initrd_start = unsafe { INITRD_START } as *const Cpio;
 
         let mut buf = Vec::new();
         write!(serial, "> ").unwrap();
@@ -186,8 +184,35 @@ pub fn control_input() {
                 fdt::dump_tree(dtb_addr);
             }
             "cat" if n_args > 1 => {
-                if let Err(CatError::FileNotFound) = ramdisk::cat(linux_initrd_start, cmds[1]) {
-                    writeln!(serial, "File '{}' not fmound", cmds[1]).unwrap();
+                let vfs = file_system::ROOT.get().unwrap();
+                match vfs.open(
+                    cmds[1],
+                    OpenFlags {
+                        read: true,
+                        write: false,
+                        create: false,
+                    },
+                ) {
+                    Ok(mut f) => {
+                        let mut buf = [0u8; 128];
+                        while let Ok(n) = f.read(&mut buf)
+                            && n > 0
+                        {
+                            match str::from_utf8(&buf[..n]) {
+                                Ok(s) => {
+                                    write!(serial, "{s}").unwrap();
+                                }
+                                Err(e) => {
+                                    writeln!(serial, "utf8 parse error: {e}").unwrap();
+                                    break;
+                                }
+                            }
+                        }
+                        writeln!(serial).unwrap();
+                    }
+                    Err(e) => {
+                        writeln!(serial, "open file '{}' error {:?}", cmds[1], e).unwrap();
+                    }
                 }
             }
             "addtask" => {
