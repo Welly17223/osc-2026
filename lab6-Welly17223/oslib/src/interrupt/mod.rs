@@ -4,7 +4,7 @@ use crate::{
     schedule::{self, current_tcb},
     thread,
     uart::{self, SERIAL},
-    virtual_mem,
+    virtual_mem::{self, vm_area::Provider},
 };
 use core::{arch::asm, cmp::Ordering, ffi, fmt::Display, panic, sync::atomic::AtomicBool};
 extern crate alloc;
@@ -539,27 +539,26 @@ extern "C" fn do_trap(regs: *mut pt_regs) {
         } else {
             // TODO: create stack mapping
             let sp: usize = if curr_sig.sig_stack.is_none() {
-                let stack =
-                    unsafe { Box::<[u8; virtual_mem::PMD_SIZE]>::new_uninit().assume_init() };
-                let stack_len = stack.len();
+                let mapper = current_tcb().vm_mapper.as_mut().unwrap();
+                let stack_top = mapper
+                    .map(
+                        thread::SIG_STACK_SIZE,
+                        virtual_mem::PROT_USER_STACK,
+                        Provider::Anonymous,
+                    )
+                    .unwrap();
 
-                let pgd = current_tcb().vm_mapper.as_mut().unwrap().pgd.as_mut();
-                let virt_addr =
-                    crate::align(regs.sscratch, virtual_mem::PMD_SIZE) - virtual_mem::PMD_SIZE;
+                curr_sig.sig_stack = Some(stack_top);
+                let top = stack_top.addr() + thread::SIG_STACK_SIZE;
 
-                let pmd =
-                    pgd.try_new_entry(virtual_mem::vpn0(virt_addr.into()), virtual_mem::PMD_SHIFT);
-                pmd[virtual_mem::vpn1(virt_addr.into())] = virtual_mem::PageTableEntry::new(
-                    virtual_mem::virt_to_phy((stack.as_ref() as *const _ as usize).into()),
-                    virtual_mem::PROT_USER_STACK,
-                );
-                curr_sig.sig_stack = Some(stack);
+                mapper
+                    .map_to_phy((top - virtual_mem::PAGE_SIZE).into())
+                    .unwrap();
 
-                virt_addr + stack_len
+                top
             } else {
                 regs.sscratch
             } - size_of::<pt_regs>();
-            let sp = crate::align(sp, align_of::<pt_regs>());
 
             let save = SetStatusSUM::new();
             unsafe {
