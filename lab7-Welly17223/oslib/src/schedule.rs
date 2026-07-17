@@ -13,16 +13,20 @@ use core::{
 
 use crate::{
     file_system,
-    interrupt::timer,
-    interrupt::{self, timer::Time},
+    interrupt::{
+        self,
+        timer::{self, Time},
+    },
     kernel_shell,
-    spinlock::SpinLock,
-    thread::alloc_pid,
-    thread::{self, Context, State, ThreadControlTable},
-    uart, virtual_mem,
+    // spinlock::SpinLock,
+    thread::{self, Context, State, ThreadControlTable, alloc_pid},
+    uart,
+    virtual_mem::{self, VirtualAddress},
 };
 
-pub type SafeSendTCB = Arc<SpinLock<ThreadControlTable>>;
+use spin::{Mutex, Once};
+
+pub type SafeSendTCB = Arc<Mutex<ThreadControlTable>>;
 
 pub const ROUND_ROBIN_TIME_LIMIT_MICRO_SEC: u64 = 1000;
 
@@ -90,7 +94,8 @@ pub struct WaitPidQueue {
 impl WaitPidQueue {
     pub fn push_current(&mut self, pid: u32) {
         let tcb_arc = curr_thread_arc();
-        let tcb = current_tcb();
+        let mut tcb_lock = tcb_arc.lock();
+        let tcb = &mut *tcb_lock;
 
         if tcb.term_children.contains_key(&pid) {
             return;
@@ -99,6 +104,7 @@ impl WaitPidQueue {
         if tcb.state == State::Running {
             tcb.state = State::Waiting;
         }
+        drop(tcb_lock);
 
         self.queue.insert(pid, tcb_arc);
     }
@@ -108,11 +114,11 @@ impl WaitPidQueue {
     }
 }
 
-pub static mut WAIT_PID_QUEUE: Option<SpinLock<WaitPidQueue>> = None;
-static mut PROCESS_READY_QUEUE: Option<alloc::collections::VecDeque<SafeSendTCB>> = None;
+pub static mut WAIT_PID_QUEUE: Once<Mutex<WaitPidQueue>> = Once::new();
+static mut PROCESS_READY_QUEUE: Once<alloc::collections::VecDeque<SafeSendTCB>> = Once::new();
 pub static mut CURR_THREAD: Option<SafeSendTCB> = None;
 
-static mut LIVE_PROC: Option<SpinLock<alloc::collections::BTreeMap<u32, SafeSendTCB>>> = None;
+static mut LIVE_PROC: Once<Mutex<alloc::collections::BTreeMap<u32, SafeSendTCB>>> = Once::new();
 
 pub fn current_tcb() -> &'static mut ThreadControlTable {
     let curr_proc_ptr: *mut ThreadControlTable;
@@ -140,27 +146,32 @@ pub fn curr_thread_arc() -> SafeSendTCB {
 }
 
 pub fn init() {
+    let process_ready_queue_ptr = &raw const PROCESS_READY_QUEUE;
+    let wait_pid_queue_ptr = &raw const WAIT_PID_QUEUE;
+    let live_proc_ptr = &raw const LIVE_PROC;
     unsafe {
-        PROCESS_READY_QUEUE = Some(VecDeque::new());
-        WAIT_PID_QUEUE = Some(SpinLock::new(WaitPidQueue {
-            queue: BTreeMap::new(),
-        }));
-        LIVE_PROC = Some(SpinLock::new(BTreeMap::new()));
+        (&*process_ready_queue_ptr).call_once(VecDeque::new);
+        (&*wait_pid_queue_ptr).call_once(|| {
+            Mutex::new(WaitPidQueue {
+                queue: BTreeMap::new(),
+            })
+        });
+        (&*live_proc_ptr).call_once(|| Mutex::new(BTreeMap::new()));
     }
 
     // Add idle thread pid = 1
     let boot_pid = alloc_pid();
-    let boot_idle_thread = Arc::new(SpinLock::new(ThreadControlTable {
+    let boot_idle_thread = Arc::new(Mutex::new(ThreadControlTable {
         context: Context {
             ra: 0,
             sp: 0,
             s: [0; 12],
-            satp: virtual_mem::make_satp(virtual_mem::virt_to_phy(
-                { &raw const virtual_mem::PGD } as _
-            )),
+            satp: virtual_mem::make_satp(
+                VirtualAddress({ &raw const virtual_mem::PGD } as _).into_phy(),
+            ),
         },
         state: State::Running,
-        pgd: None,
+        vm_mapper: None,
         pid: boot_pid,
         exit_code: 0,
         kernel_stack: Box::new([0; 1]),
@@ -168,17 +179,15 @@ pub fn init() {
         term_children: Box::new(BTreeMap::new()),
         parent: None,
         ppid: 1,
-        user_init_sp: 0,
-        mmap_start_addr: 0,
+        user_init_sp: 0usize.into(),
         awake_time: 0,
         reschedule: false,
         sig: Box::new(thread::SigAct::default()),
         cwd: file_system::ROOT.get().unwrap().root().unwrap(),
         fdt: file_system::FileDescribeTable::default(),
-        text_file: None,
     }));
 
-    let boot_tcb_ptr = boot_idle_thread.as_ref().lock().get() as *const _ as usize;
+    let boot_tcb_ptr = &*boot_idle_thread.as_ref().lock() as *const _ as usize;
     unsafe {
         CURR_THREAD = Some(boot_idle_thread.clone());
         IDLE_THREAD_TCB = Some(boot_idle_thread.clone());
@@ -192,10 +201,9 @@ pub fn init() {
         (1 << 5) | (1 << 8),
     );
     let kernel_shell_pid = kernel_shell.pid;
-    let kernel_shell = Arc::new(SpinLock::new(kernel_shell));
+    let kernel_shell = Arc::new(Mutex::new(kernel_shell));
     get_live_proc()
         .lock()
-        .get_mut()
         .insert(kernel_shell_pid, kernel_shell.clone());
     get_process_ready_queue_mut().push_back(kernel_shell);
 
@@ -223,7 +231,7 @@ pub fn get_init_thread() -> SafeSendTCB {
 
 pub fn get_process_ready_queue_mut() -> &'static mut VecDeque<SafeSendTCB> {
     let ptr = &raw mut PROCESS_READY_QUEUE;
-    if let Some(l) = unsafe { &mut *ptr }.as_mut() {
+    if let Some(l) = unsafe { &mut *ptr }.get_mut() {
         l
     } else {
         panic!("Not initilized");
@@ -232,44 +240,44 @@ pub fn get_process_ready_queue_mut() -> &'static mut VecDeque<SafeSendTCB> {
 
 pub fn get_process_ready_queue() -> &'static VecDeque<SafeSendTCB> {
     let ptr = &raw mut PROCESS_READY_QUEUE;
-    if let Some(l) = unsafe { &mut *ptr }.as_ref() {
+    if let Some(l) = unsafe { &mut *ptr }.get_mut() {
         l
     } else {
         panic!("Not initilized");
     }
 }
 
-pub fn get_waitpid_queue_mut() -> &'static SpinLock<WaitPidQueue> {
+pub fn get_waitpid_queue_mut() -> &'static Mutex<WaitPidQueue> {
     let ptr = &raw const WAIT_PID_QUEUE;
-    if let Some(l) = unsafe { &*ptr } {
+    if let Some(l) = unsafe { &*ptr }.get() {
         l
     } else {
         panic!("Not initilized");
     }
 }
 
-pub fn get_live_proc() -> &'static SpinLock<BTreeMap<u32, SafeSendTCB>> {
+pub fn get_live_proc() -> &'static Mutex<BTreeMap<u32, SafeSendTCB>> {
     let ptr = &raw const LIVE_PROC;
-    match unsafe { &*ptr }.as_ref() {
+    match unsafe { &*ptr }.get() {
         Some(t) => t,
         None => panic!("Not initilized"),
     }
 }
 
 pub fn kwait_pid(pid: u32) -> isize {
-    let lock = get_waitpid_queue_mut().lock();
-    lock.get_mut().push_current(pid);
+    let mut lock = get_waitpid_queue_mut().lock();
+    lock.push_current(pid);
     drop(lock);
 
     schedule();
 
     let arc = curr_thread_arc();
-    let lock = arc.lock();
-    lock.get_mut().children.remove(&pid);
+    let mut lock = arc.lock();
+    lock.children.remove(&pid);
 
-    let term_queue = &mut lock.get_mut().term_children;
+    let term_queue = &mut lock.term_children;
     let children = term_queue.remove(&pid).unwrap();
-    children.lock().get().exit_code
+    children.lock().exit_code
 }
 
 #[derive(Default)]
@@ -314,24 +322,12 @@ pub struct RiscVRegs {
 pub fn schedule() {
     let _disable_interrupt = interrupt::SModeInterrupt::new();
     let thread_queue_ptr = &raw mut PROCESS_READY_QUEUE;
-    let thread_queue = unsafe { &mut *thread_queue_ptr }.as_mut().unwrap();
+    let thread_queue = unsafe { &mut *thread_queue_ptr }.get_mut().unwrap();
     let curr_process_ptr = &raw mut CURR_THREAD;
 
-    let curr_process_arc = match unsafe { &mut *(curr_process_ptr) }.take() {
-        Some(p) => p,
-        None => {
-            let idle = &raw const IDLE_THREAD_TCB;
-            if let Some(idle) = unsafe { &*idle } {
-                idle.clone()
-            } else {
-                return;
-            }
-        }
-    };
-    let Some(curr_process_lock) = curr_process_arc.try_lock() else {
-        panic!("Locked!");
-    };
-    let curr_process = curr_process_lock.get_mut();
+    let curr_process_arc = unsafe { &mut *(curr_process_ptr) }.take().unwrap();
+    let mut curr_process_lock = curr_process_arc.lock();
+    let curr_process = &mut *curr_process_lock;
     let curr_process_ptr = curr_process as *const _;
 
     match curr_process.state {
@@ -341,23 +337,22 @@ pub fn schedule() {
         }
         State::Terminate => {
             let init_thread_arc = get_init_thread();
-            let init_thread_lock = init_thread_arc.lock();
-            let init_thread = init_thread_lock.get_mut();
+            let mut init_thread_lock = init_thread_arc.lock();
+            let init_thread = &mut *init_thread_lock;
 
             curr_process.children.iter().filter(|(pid, child)| {
-                let child = child.lock().get();
+                let child = child.lock();
                 if child.state == State::Terminate {
                     curr_process.term_children.remove(pid).is_none()
                 } else {
                     true
                 }
             }).for_each(|(pid, child)| {
-                let lock = child.lock();
-                let child_thread = lock.get_mut();
+                let mut child_thread = child.lock();
                 child_thread.ppid = init_thread.pid;
                 child_thread.parent = Some(init_thread_arc.clone());
 
-                // writeln!(uart::get_serial(), "move orphan {} parent to init!", pid).unwrap();
+                writeln!(uart::get_serial(), "move orphan {} parent to init!", pid).unwrap();
 
                 init_thread.children.insert(*pid, child.clone());
 
@@ -368,34 +363,36 @@ pub fn schedule() {
             drop(init_thread_lock);
 
             // clear data from live thread
-            let live_queue = get_live_proc().lock();
-            live_queue.get_mut().remove(&curr_process.pid);
+            let mut live_queue = get_live_proc().lock();
+            live_queue.remove(&curr_process.pid);
 
             // push self to terminate queue
             let parent_arc = curr_process.parent.as_ref().unwrap().clone();
-            let parent_lock = parent_arc.lock();
-            let parent = parent_lock.get_mut();
+            let mut parent = parent_arc.lock();
             let parent_children_queue = &mut parent.children;
-            let parent_term_queue = &mut parent.term_children;
-
             parent_children_queue.remove(&curr_process.pid);
+
+            let parent_term_queue = &mut parent.term_children;
             parent_term_queue
                 .insert(current_tcb().pid, curr_process_arc.clone());
-            drop(parent_lock);
+            drop(parent);
 
             // check if there are proccess is waiting for the thread
             let waitpid_queue_lock = get_waitpid_queue_mut().lock();
-            let wait_pid_queue = waitpid_queue_lock.get_mut();
+            let mut wait_pid_queue = waitpid_queue_lock;
 
             if let Some(thread) = wait_pid_queue.pop(current_tcb().pid as _) {
-                let lock = thread.lock();
-                if lock.get().state == State::Waiting {
-                    lock.get_mut().state = State::Ready;
+                let mut lock = thread.lock();
+                if lock.state == State::Waiting {
+                    lock.state = State::Ready;
                 }
                 drop(lock);
 
                 get_process_ready_queue_mut().push_back(thread);
             }
+
+            // drop memory
+            drop(curr_process.vm_mapper.take());
         }
         _ => {}
     }
@@ -407,14 +404,13 @@ pub fn schedule() {
         true => return,
         false => {
             let next_proc_arc = thread_queue.pop_front().unwrap();
-            let next_proc_lock = next_proc_arc.lock();
-            let next_proc = next_proc_lock.get_mut();
-            let next_proc_ptr = next_proc as *const _;
+            let mut next_proc = next_proc_arc.lock();
+            let next_proc_ptr = &*next_proc as *const _;
             if next_proc.state == State::Ready || next_proc.state == State::New {
                 next_proc.state = State::Running;
             }
 
-            drop(next_proc_lock);
+            drop(next_proc);
             unsafe { CURR_THREAD = Some(next_proc_arc) };
             next_proc_ptr
         }

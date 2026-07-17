@@ -1,10 +1,12 @@
 extern crate alloc;
 use crate::{
-    file_system::{self, OpenFlags, SeekFrom},
+    file_system::{self, OpenFlags},
     interrupt::{self, pt_regs},
-    schedule::{self, curr_thread_arc, current_tcb},
-    spinlock::SpinLock,
-    thread, virtual_mem,
+    schedule::{self, curr_thread_arc},
+    virtual_mem::{
+        self, VirtualAddress,
+        vm_area::{self, Provider},
+    },
 };
 use alloc::{
     boxed::Box,
@@ -12,12 +14,13 @@ use alloc::{
     sync::{Arc, Weak},
 };
 use core::{
-    alloc::Layout,
     arch::naked_asm,
-    pin::Pin,
+    ptr,
     sync::atomic::{self, AtomicU32},
 };
+use spin::Mutex;
 
+pub const SIG_STACK_SIZE: usize = virtual_mem::PMD_SIZE;
 static ALLOC_PID: AtomicU32 = AtomicU32::new(1);
 
 pub fn alloc_pid() -> u32 {
@@ -29,6 +32,11 @@ pub trait ThreadQueue {
     fn pop(&mut self) -> Option<schedule::SafeSendTCB>;
 }
 
+unsafe extern "C" {
+    pub static __user_text_start: usize;
+    pub static __user_text_end: usize;
+}
+
 #[derive(Default, Clone, Copy)]
 #[repr(C)]
 pub struct Context {
@@ -38,18 +46,18 @@ pub struct Context {
     pub satp: usize,
 }
 
+#[derive(Default, Clone, Copy)]
+pub struct TextArea {
+    pub base: usize,
+    pub target: &'static [u8],
+}
+
 #[derive(Clone)]
 pub struct SigAct {
     pub sig_mask: u64,
     pub sig_handler_func: [usize; u64::BITS as usize],
-    pub sig_stack: Option<Box<[u8]>>,
+    pub sig_stack: Option<VirtualAddress>,
     pub sig_ret_addr: usize,
-}
-
-#[derive(Default, Clone, Copy)]
-pub struct TextArea {
-    pub base: usize,
-    pub len: usize,
 }
 
 impl Default for SigAct {
@@ -68,7 +76,7 @@ impl Default for SigAct {
 pub struct ThreadControlTable {
     pub context: Context,
     pub awake_time: u64,
-    pub user_init_sp: usize,
+    pub user_init_sp: VirtualAddress,
     pub exit_code: isize,
     pub state: State,
     pub pid: u32,
@@ -77,16 +85,13 @@ pub struct ThreadControlTable {
     pub children: Box<BTreeMap<u32, schedule::SafeSendTCB>>,
     pub term_children: Box<BTreeMap<u32, schedule::SafeSendTCB>>,
     pub kernel_stack: Box<[u8]>,
-    pub mmap_start_addr: usize,
-    // pub stack: Option<Box<[u8]>>,
-    pub pgd: Option<Pin<Box<virtual_mem::PageTable>>>,
+    pub vm_mapper: Option<Box<vm_area::Manager>>,
     pub reschedule: bool,
     pub sig: Box<SigAct>,
     // FileDescribeTable
     pub fdt: file_system::FileDescribeTable,
     // Curren work Directory
     pub cwd: file_system::VNode,
-    pub text_file: Option<file_system::File>,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -101,10 +106,19 @@ pub enum State {
 pub fn idle_thread() -> ! {
     let init_arc = schedule::get_init_thread();
     loop {
-        let lock = init_arc.lock();
-        lock.get_mut().term_children.clear();
+        let mut lock = init_arc.lock();
+        lock.term_children.clear();
         drop(lock);
 
+        let disable = crate::interrupt::SModeInterrupt::new();
+
+        if schedule::get_process_ready_queue().is_empty() {
+            unsafe {
+                core::arch::asm!("wfi");
+            }
+        }
+
+        drop(disable);
         schedule::schedule();
     }
 }
@@ -140,6 +154,7 @@ impl Drop for ThreadControlTable {
 /// This function invoke exit system call for u mode thread
 #[unsafe(naked)]
 #[unsafe(no_mangle)]
+#[unsafe(link_section = ".text.user")]
 pub extern "C" fn u_mode_do_exit(code: isize) -> ! {
     naked_asm!(
         r#"
@@ -152,7 +167,7 @@ pub extern "C" fn u_mode_do_exit(code: isize) -> ! {
 #[unsafe(no_mangle)]
 pub extern "C" fn do_exit(code: isize) -> ! {
     let arc = curr_thread_arc();
-    unsafe { arc.unlock() };
+    unsafe { arc.force_unlock() };
     drop(arc);
     // Make sure to drop the lock before kill the task
     let curr_tcb = schedule::current_tcb();
@@ -174,21 +189,7 @@ impl ThreadControlTable {
         s[0] = func as _;
         s[1] = sstatus;
 
-        // Alloc kernel stack for u mode stack
-        /* let (stack, stack_top_ptr) = if sstatus & (1 << 8) == 0 {
-            schedule::USER_THREAD_COUNT.fetch_add(1, atomic::Ordering::Relaxed);
-            let stack = unsafe { Box::<[u8; 0x10000]>::new_zeroed().assume_init() };
-            let stack_top_ptr = stack.as_ptr().wrapping_byte_add(stack.len()) as usize;
-            s[2] = stack_top_ptr;
-            s[3] = u_mode_do_exit as *const () as _;
-
-            (Some(stack as _), stack_top_ptr)
-        } else {
-            s[3] = do_exit as *const () as _;
-            (None, 0)
-        }; */
-
-        let stack_top_ptr = 0;
+        let stack_top_ptr = VirtualAddress(0);
         s[3] = do_exit as *const () as _;
 
         Self {
@@ -197,11 +198,11 @@ impl ThreadControlTable {
                 sp: kernel_stack_top_ptr,
                 s,
                 satp: virtual_mem::make_satp(virtual_mem::virt_to_phy(
-                    &raw const virtual_mem::PGD as _,
+                    (&raw const virtual_mem::PGD as usize).into(),
                 )),
             },
             state: State::New,
-            pgd: None,
+            vm_mapper: None,
             children: Box::new(BTreeMap::new()),
             term_children: Box::new(BTreeMap::new()),
             parent: Some(schedule::curr_thread_arc()),
@@ -211,56 +212,72 @@ impl ThreadControlTable {
             exit_code: 0,
             kernel_stack,
             user_init_sp: stack_top_ptr,
-            mmap_start_addr: virtual_mem::USER_MODE_STACK_ADDRESS,
+            // mmap_start_addr: virtual_mem::USER_MODE_STACK_ADDRESS,
             reschedule: false,
             sig: Box::new(SigAct::default()),
             cwd: file_system::ROOT.get().unwrap().root().unwrap(),
             fdt: file_system::FileDescribeTable::default(),
-            text_file: None,
+            // text: TextArea::default(),
         }
     }
 
-    pub fn new_user_thread(mut file: file_system::File, func: *const (), ppid: u32) -> Self {
+    pub fn new_user_thread(file: file_system::File, _func: *const (), ppid: u32) -> Self {
         let kernel_stack =
             unsafe { Box::<[u8; virtual_mem::PMD_SIZE]>::new_zeroed().assume_init() };
         let kernel_stack_top_ptr =
             kernel_stack.as_ptr().wrapping_byte_add(kernel_stack.len()) as usize;
 
+        let mut vm_mapper = vm_area::Manager::new();
+        // let mut program_pgd = Box::new(virtual_mem::root_pgd_clone());
+
+        vm_mapper
+            .map_file_addr(
+                virtual_mem::VirtualAddress(0),
+                file,
+                virtual_mem::PROT_USER_TEXT,
+            )
+            .unwrap();
         // virtual_mem::load_user_program(&mut program_pgd, user_program.as_ref());
-        let mut program_pgd = Box::new(virtual_mem::root_pgd_clone());
-        let text_len = file.seek(SeekFrom::End(0)).unwrap() as usize;
 
         let mut sig = SigAct::default();
-        let sig_ret_phy_addr = virtual_mem::virt_to_phy(sig_ret as *const () as usize);
-        let sig_reg_virt_addr =
-            virtual_mem::USER_MODE_START_ADDRESS + crate::align(text_len, virtual_mem::PAGE_SIZE);
-        virtual_mem::pagewalk(
-            program_pgd.as_mut(),
-            sig_reg_virt_addr,
-            sig_ret_phy_addr,
-            virtual_mem::PROT_USER_TEXT,
-        );
-        sig.sig_ret_addr =
-            sig_reg_virt_addr + sig_ret_phy_addr - (sig_ret_phy_addr & virtual_mem::PAGE_MASK);
 
-        // stack pgd
-        // let stack_ptr = unsafe { alloc::alloc::alloc(Layout::new::<[u8; 4096]>()) };
-        for i in 1..1024 {
-            virtual_mem::pagewalk(
-                program_pgd.as_mut(),
-                virtual_mem::USER_MODE_STACK_ADDRESS - virtual_mem::PAGE_SIZE * i,
-                0,
-                (virtual_mem::PROT_USER_STACK & !1) | virtual_mem::PTE_M,
-            );
-        }
-        let program_pgd = Pin::new(program_pgd);
+        let user_text = unsafe {
+            &*ptr::slice_from_raw_parts(
+                &raw const __user_text_start as *const u8,
+                (&raw const __user_text_end) as usize - (&raw const __user_text_start) as usize,
+            )
+        };
+
+        let sig_ret_func = sig_ret as *const () as usize;
+        let sig_ret_func_offset = sig_ret_func & 0xfff;
+        let user_do_exit_offset = (u_mode_do_exit as *const () as usize) & 0xfff;
+
+        let user_text_base = vm_mapper
+            .map(
+                user_text.len(),
+                virtual_mem::PROT_USER_TEXT,
+                Provider::Mem(user_text),
+            )
+            .unwrap();
+
+        sig.sig_ret_addr = user_text_base.addr() + sig_ret_func_offset;
+        vm_mapper
+            .map_addr(
+                virtual_mem::VirtualAddress(
+                    virtual_mem::USER_MODE_STACK_ADDRESS.addr() - 2 * virtual_mem::PMD_SIZE,
+                ),
+                2 * virtual_mem::PMD_SIZE,
+                virtual_mem::PROT_USER_STACK,
+                vm_area::Provider::Anonymous,
+            )
+            .unwrap();
 
         let mut s = [0; 12];
         let pid = alloc_pid();
-        s[0] = virtual_mem::USER_MODE_START_ADDRESS;
+        s[0] = virtual_mem::USER_MODE_START_ADDRESS.addr();
         s[1] = 1 << 5;
-        s[2] = virtual_mem::USER_MODE_STACK_ADDRESS;
-        s[3] = u_mode_do_exit as *const () as _;
+        s[2] = virtual_mem::USER_MODE_STACK_ADDRESS.addr();
+        s[3] = user_text_base.addr() + user_do_exit_offset;
 
         // file system for stdin, stdout, stderr
         let mut fdt = file_system::FileDescribeTable::default();
@@ -273,12 +290,10 @@ impl ThreadControlTable {
                 ra: init_thread as *const () as _,
                 sp: kernel_stack_top_ptr,
                 s,
-                satp: virtual_mem::make_satp(virtual_mem::virt_to_phy(
-                    &raw const program_pgd.entries as _,
-                )),
+                satp: vm_mapper.satp(),
             },
             state: State::New,
-            pgd: Some(program_pgd),
+            vm_mapper: Some(Box::new(vm_mapper)),
             children: Box::new(BTreeMap::new()),
             term_children: Box::new(BTreeMap::new()),
             parent: Some(schedule::curr_thread_arc()),
@@ -288,54 +303,42 @@ impl ThreadControlTable {
             exit_code: 0,
             kernel_stack,
             user_init_sp: virtual_mem::USER_MODE_STACK_ADDRESS,
-            mmap_start_addr: virtual_mem::USER_MODE_START_ADDRESS
-                + crate::align(text_len, virtual_mem::PGD_SIZE),
             reschedule: false,
             sig: Box::new(sig),
             cwd: file_system::ROOT.get().unwrap().root().unwrap(),
             fdt,
-            text_file: Some(file),
         }
     }
 
     pub fn create(func: *const (), ppid: u32, sstatus: usize) -> u32 {
         let thread = Self::new_kernel_thread(func, ppid, sstatus);
         let pid = thread.pid;
-        let thread = Arc::new(SpinLock::new(thread));
+        let thread = Arc::new(Mutex::new(thread));
         schedule::get_process_ready_queue_mut().push_back(thread.clone());
-        schedule::get_live_proc()
-            .lock()
-            .get_mut()
-            .insert(pid, thread);
+        schedule::get_live_proc().lock().insert(pid, thread);
         pid
     }
 
     pub fn create_thread(thread: Self) -> u32 {
         let pid = thread.pid;
-        let thread = Arc::new(SpinLock::new(thread));
+        let thread = Arc::new(Mutex::new(thread));
         schedule::get_process_ready_queue_mut().push_back(thread.clone());
-        schedule::get_live_proc()
-            .lock()
-            .get_mut()
-            .insert(pid, thread);
+        schedule::get_live_proc().lock().insert(pid, thread);
         pid
     }
 
     pub fn fork(&mut self, regs: &pt_regs) -> u32 {
         let mut children = self.clone();
         let children_regs = *regs;
-        let tcb = current_tcb();
-        tcb.pgd.as_mut().unwrap().set_fork_prop(0, 255);
 
         let pid = alloc_pid();
 
         children.children.clear();
         children.user_init_sp = virtual_mem::USER_MODE_STACK_ADDRESS;
 
-        children.context.satp = virtual_mem::make_satp(virtual_mem::virt_to_phy(
-            &raw const children.pgd.as_ref().unwrap().entries as _,
-        ));
-        children.pgd.as_mut().unwrap().set_fork_prop(0, 255);
+        let child_vm_mapper = children.vm_mapper.as_mut().unwrap();
+        children.context.satp = child_vm_mapper.satp();
+        child_vm_mapper.pgd.set_fork_prop(0..256);
 
         children.state = State::Ready;
         children.pid = pid;
@@ -354,12 +357,11 @@ impl ThreadControlTable {
             (children.context.sp as *mut interrupt::pt_regs).write(children_regs);
         }
 
-        let children = Arc::new(SpinLock::new(children));
+        let children = Arc::new(Mutex::new(children));
 
         self.children.insert(pid, children.clone());
         schedule::get_live_proc()
             .lock()
-            .get_mut()
             .insert(pid, children.clone());
         schedule::get_process_ready_queue_mut().push_back(children);
 
@@ -438,6 +440,7 @@ pub unsafe extern "C" fn init_thread() {
 
 #[unsafe(naked)]
 #[unsafe(no_mangle)]
+#[unsafe(link_section = ".text.user")]
 /// # Safety
 /// only use when return from a userspace signal handler
 pub unsafe extern "C" fn sig_ret() {
@@ -451,28 +454,28 @@ pub unsafe extern "C" fn sig_ret() {
 
 #[derive(Default)]
 pub struct WaitQueue {
-    queue: alloc::collections::VecDeque<Weak<SpinLock<ThreadControlTable>>>,
+    queue: alloc::collections::VecDeque<Weak<Mutex<ThreadControlTable>>>,
 }
 
 impl ThreadQueue for WaitQueue {
     fn push_current(&mut self) {
         let tcb_arc = schedule::curr_thread_arc();
-        let tcb_lock = tcb_arc.lock();
-        let tcb = tcb_lock.get_mut();
+        let mut tcb = tcb_arc.lock();
 
         if tcb.state == State::Running {
             tcb.state = State::Waiting;
         }
-        drop(tcb_lock);
+        drop(tcb);
 
         self.queue.push_back(Arc::downgrade(&tcb_arc));
     }
 
     fn pop(&mut self) -> Option<schedule::SafeSendTCB> {
         loop {
-            let node = self.queue.pop_front()?;
-            if let Some(proc) = node.upgrade() {
-                break Some(proc);
+            let weak = self.queue.pop_front()?;
+            let arc = weak.upgrade();
+            if arc.is_some() {
+                break arc;
             }
         }
     }

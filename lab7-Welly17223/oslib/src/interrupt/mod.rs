@@ -1,15 +1,14 @@
-use crate::interrupt::timer::offset_sec;
-use crate::schedule::current_tcb;
-use crate::{fdt, interrupt::plic::IRQ, uart::SERIAL};
-use crate::{schedule, thread, uart, virtual_mem};
-use core::arch::asm;
-use core::cmp::Ordering;
-use core::sync::atomic::AtomicBool;
-use core::{ffi, panic};
+use crate::{
+    fdt,
+    interrupt::{plic::IRQ, timer::offset_sec},
+    schedule::{self, current_tcb},
+    thread,
+    uart::{self, SERIAL},
+    virtual_mem::{self, vm_area::Provider},
+};
+use core::{arch::asm, cmp::Ordering, ffi, fmt::Display, panic, sync::atomic::AtomicBool};
 extern crate alloc;
-use alloc::boxed::Box;
-use alloc::string::String;
-use core::fmt::Display;
+use alloc::{boxed::Box, string::String};
 
 pub mod input_handler;
 pub mod page_fault;
@@ -513,7 +512,7 @@ extern "C" fn do_trap(regs: *mut pt_regs) {
                 serial.puts(" stval: ");
                 serial.put_hex(regs.stval as u64);
                 serial.putc(b'\n');
-                panic!("{} {} {}", regs.scause, regs.sepc, regs.stval);
+                panic!("{} {:#x} {}", regs.scause, regs.sepc, regs.stval);
             }
             _ => {
                 serial.puts("\nNot yet handle scause: ");
@@ -523,7 +522,7 @@ extern "C" fn do_trap(regs: *mut pt_regs) {
                 serial.puts(" stval: ");
                 serial.put_hex(regs.stval as u64);
                 serial.putc(b'\n');
-                panic!("{} {} {}", regs.scause, regs.sepc, regs.stval);
+                panic!("{} {:#x} {}", regs.scause, regs.sepc, regs.stval);
             }
         }
     }
@@ -540,25 +539,26 @@ extern "C" fn do_trap(regs: *mut pt_regs) {
         } else {
             // TODO: create stack mapping
             let sp: usize = if curr_sig.sig_stack.is_none() {
-                let stack =
-                    unsafe { Box::<[u8; virtual_mem::PMD_SIZE]>::new_uninit().assume_init() };
-                let stack_len = stack.len();
+                let mapper = current_tcb().vm_mapper.as_mut().unwrap();
+                let stack_top = mapper
+                    .map(
+                        thread::SIG_STACK_SIZE,
+                        virtual_mem::PROT_USER_STACK,
+                        Provider::Anonymous,
+                    )
+                    .unwrap();
 
-                let mut pgd = current_tcb().pgd.as_mut().unwrap().as_mut();
-                let virt_addr =
-                    crate::align(regs.sscratch, virtual_mem::PMD_SIZE) - virtual_mem::PMD_SIZE;
-                let pmd = pgd.try_new_entry(virtual_mem::vpn0(virt_addr), virtual_mem::PMD_SHIFT);
-                pmd[virtual_mem::vpn1(virt_addr)] = virtual_mem::PageTableEntry::new(
-                    virtual_mem::virt_to_phy(stack.as_ref() as *const _ as _),
-                    virtual_mem::PROT_USER_STACK,
-                );
-                curr_sig.sig_stack = Some(stack);
+                curr_sig.sig_stack = Some(stack_top);
+                let top = stack_top.addr() + thread::SIG_STACK_SIZE;
 
-                virt_addr + stack_len
+                mapper
+                    .map_to_phy((top - virtual_mem::PAGE_SIZE).into())
+                    .unwrap();
+
+                top
             } else {
                 regs.sscratch
             } - size_of::<pt_regs>();
-            let sp = crate::align(sp, align_of::<pt_regs>());
 
             let save = SetStatusSUM::new();
             unsafe {

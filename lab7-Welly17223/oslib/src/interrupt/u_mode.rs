@@ -4,13 +4,13 @@ use crate::{
     display,
     file_system::{self, OpenFlags, SeekFrom, VnodeType},
     interrupt::{InterruptTrait, SetStatusSUM, timer},
-    ramdisk,
     schedule::{self, current_pid, current_tcb},
     thread::{self},
     uart::{self, get_serial},
-    virtual_mem::{self, vpn0},
+    virtual_mem::{self, vm_area::Provider},
 };
 use alloc::{boxed::Box, string::String, vec, vec::Vec};
+use bitflags::bitflags;
 use core::{
     arch::asm,
     ffi::{self, CStr},
@@ -48,11 +48,8 @@ impl InterruptTrait for Interrupt {
             }
             SModeInterruptEnum::UartWrite => {
                 let serial = get_serial();
-                let sstatus_sum = SetStatusSUM::new();
-                let str =
-                    unsafe { &*ptr::slice_from_raw_parts(regs.a0 as *const u8, regs.a1) }.to_vec();
-                drop(sstatus_sum);
-                serial.push_tx(&str);
+                let str = unsafe { &*ptr::slice_from_raw_parts(regs.a0 as *const u8, regs.a1) };
+                serial.push_tx(str);
                 regs.a0 = str.len();
             }
             SModeInterruptEnum::Exec => {
@@ -69,37 +66,63 @@ impl InterruptTrait for Interrupt {
 
                 if let Ok(file) = vfs.open(file_name, file_system::OpenFlags::from("r")) {
                     let tcb = current_tcb();
-                    let prev_file_len = tcb.text_file.take().unwrap().len().unwrap() as usize;
-                    let curr_file_len = file.len().unwrap() as usize;
-                    let root_pgd = current_tcb().pgd.as_mut().unwrap().as_mut().get_mut();
+                    let mut new_vm_mapper = virtual_mem::vm_area::Manager::new();
+                    new_vm_mapper
+                        .map_file_addr(0_usize.into(), file, virtual_mem::PROT_USER_TEXT)
+                        .unwrap();
 
-                    for addr in (0..prev_file_len).step_by(virtual_mem::PGD_SIZE) {
-                        if let Some(leaf) = root_pgd[vpn0(addr)].to_leaf_ref() {
-                            drop(unsafe { Box::from_raw(leaf as *mut virtual_mem::PageTable) });
-                        }
-                        root_pgd[vpn0(addr)].clear();
+                    new_vm_mapper
+                        .map_addr(
+                            virtual_mem::VirtualAddress(
+                                virtual_mem::USER_MODE_STACK_ADDRESS.addr()
+                                    - 2 * virtual_mem::PMD_SIZE,
+                            ),
+                            2 * virtual_mem::PMD_SIZE,
+                            virtual_mem::PROT_USER_STACK,
+                            virtual_mem::vm_area::Provider::Anonymous,
+                        )
+                        .unwrap();
+
+                    let mut sig = thread::SigAct::default();
+
+                    let user_text = unsafe {
+                        &*ptr::slice_from_raw_parts(
+                            &thread::__user_text_start as *const usize as *const u8,
+                            (&thread::__user_text_end) as *const usize as usize
+                                - (&thread::__user_text_start) as *const usize as usize,
+                        )
+                    };
+
+                    let sig_ret_func = thread::sig_ret as *const () as usize;
+                    let sig_ret_func_offset = sig_ret_func & 0xfff;
+                    let u_mode_do_exit_offset =
+                        (thread::u_mode_do_exit as *const () as usize) & 0xfff;
+                    let mut sig_ret_func_copied: Box<[u8]> = Box::from([0u8; 0x1000]);
+                    sig_ret_func_copied[..user_text.len()].copy_from_slice(user_text);
+
+                    let sig_map_base = new_vm_mapper
+                        .map(
+                            user_text.len(),
+                            virtual_mem::PROT_USER_TEXT,
+                            Provider::Mem(user_text),
+                        )
+                        .unwrap();
+
+                    sig.sig_ret_addr = sig_map_base.addr() + sig_ret_func_offset;
+
+                    tcb.context.satp = new_vm_mapper.satp();
+                    tcb.vm_mapper = Some(Box::new(new_vm_mapper));
+                    *tcb.sig = sig;
+
+                    unsafe {
+                        asm!("csrw satp, {}", in(reg) tcb.context.satp);
+                        asm!("sfence.vma");
                     }
 
-                    let sig_ret_phy_addr =
-                        virtual_mem::virt_to_phy(thread::sig_ret as *const () as usize);
-                    let sig_reg_virt_addr = virtual_mem::USER_MODE_START_ADDRESS
-                        + crate::align(curr_file_len, virtual_mem::PAGE_SIZE);
-                    virtual_mem::pagewalk(
-                        root_pgd as *mut _,
-                        sig_reg_virt_addr,
-                        sig_ret_phy_addr,
-                        virtual_mem::PROT_USER_TEXT,
-                    );
-                    tcb.sig.sig_ret_addr = sig_reg_virt_addr;
-
-                    tcb.mmap_start_addr = virtual_mem::USER_MODE_START_ADDRESS
-                        + crate::align(curr_file_len, virtual_mem::PGD_SIZE);
-                    tcb.text_file = Some(file);
-
-                    regs.sepc = virtual_mem::USER_MODE_START_ADDRESS;
-                    regs.sscratch = virtual_mem::USER_MODE_STACK_ADDRESS;
+                    regs.sepc = virtual_mem::USER_MODE_START_ADDRESS.addr();
+                    regs.sscratch = virtual_mem::USER_MODE_STACK_ADDRESS.addr();
                     regs.a0 = 0;
-                    regs.ra = thread::u_mode_do_exit as *const () as _;
+                    regs.ra = sig_map_base.addr() + u_mode_do_exit_offset;
                 } else {
                     regs.a0 = -1_isize as _;
                 }
@@ -110,19 +133,20 @@ impl InterruptTrait for Interrupt {
             }
             SModeInterruptEnum::WaitPID => {
                 let pid = regs.a0 as _;
-                let lock = schedule::get_waitpid_queue_mut().lock();
-                lock.get_mut().push_current(pid);
+                let mut lock = schedule::get_waitpid_queue_mut().lock();
+                lock.push_current(pid);
                 drop(lock);
                 writeln!(uart::get_serial(), "{} wait for {}", current_pid(), pid).unwrap();
 
                 schedule::schedule();
 
-                let tcb = current_tcb();
-                tcb.children.remove(&pid);
+                let arc = schedule::curr_thread_arc();
+                let mut lock = arc.lock();
+                lock.children.remove(&pid);
 
-                let term_queue = &mut tcb.term_children;
+                let term_queue = &mut lock.term_children;
                 let children = term_queue.remove(&pid).unwrap();
-                regs.a0 = children.lock().get().exit_code as _;
+                regs.a0 = children.lock().exit_code as _;
             }
             SModeInterruptEnum::Exit => {
                 let exit_code = regs.a0 as _;
@@ -131,11 +155,10 @@ impl InterruptTrait for Interrupt {
             }
             SModeInterruptEnum::Stop => {
                 let target_pid = regs.a0 as _;
-                let lock = schedule::get_live_proc().lock();
-                let live_thread = lock.get_mut();
+                let live_thread = schedule::get_live_proc().lock();
 
                 regs.a0 = if let Some(target) = live_thread.get(&target_pid) {
-                    target.lock().get_mut().state = thread::State::Terminate;
+                    target.lock().state = thread::State::Terminate;
                     0
                 } else {
                     -1_isize as _
@@ -148,8 +171,7 @@ impl InterruptTrait for Interrupt {
                 let delay_usec = regs.a0;
 
                 let current_process = schedule::curr_thread_arc();
-                let current_lock = current_process.lock();
-                let curr_proc = current_lock.get_mut();
+                let mut curr_proc = current_process.lock();
 
                 if curr_proc.state == thread::State::Running {
                     curr_proc.state = thread::State::Waiting;
@@ -157,18 +179,18 @@ impl InterruptTrait for Interrupt {
                     let wait_usec: fn(*const u8) = |t: *const u8| {
                         let proc_box: Box<schedule::SafeSendTCB> =
                             unsafe { Box::from_raw(t as *mut _) };
-                        let proc_lock = proc_box.lock();
-                        let proc = proc_lock.get_mut();
 
+                        let mut proc = proc_box.lock();
                         if proc.state == thread::State::Waiting {
                             proc.state = thread::State::Ready;
                         }
-                        drop(proc_lock);
+                        drop(proc);
 
                         schedule::get_process_ready_queue_mut().push_back(*proc_box);
                     };
 
-                    let args = Box::new(current_process.clone());
+                    drop(curr_proc);
+                    let args = Box::new(current_process);
 
                     timer::add_timer(
                         timer::Time::new(delay_usec as _, timer::TimeUnit::MicroSec),
@@ -177,7 +199,6 @@ impl InterruptTrait for Interrupt {
                         false,
                     );
                 }
-                drop(current_lock);
 
                 schedule::schedule();
                 regs.a0 = 0;
@@ -200,18 +221,18 @@ impl InterruptTrait for Interrupt {
                 let prev_regs = unsafe { (regs.sscratch as *const pt_regs).read_volatile() };
                 let curr_sig = &mut current_tcb().sig;
                 let sig_stack = curr_sig.sig_stack.as_ref().unwrap();
-                let sig_stack_buttom = sig_stack.as_ptr() as usize;
-                let sig_stack_top = sig_stack_buttom + sig_stack.len();
+                let sig_stack_buttom = sig_stack.addr();
+                let sig_stack_top = sig_stack_buttom + thread::SIG_STACK_SIZE;
                 drop(save);
 
                 if !(prev_regs.sscratch > sig_stack_buttom && prev_regs.sscratch < sig_stack_top) {
-                    curr_sig.sig_stack.take();
-                    let virt_addr = crate::align(prev_regs.sscratch, virtual_mem::PMD_SIZE)
-                        - virtual_mem::PMD_SIZE;
-                    let mut pgd = current_tcb().pgd.as_mut().unwrap().as_mut();
-                    let pmd =
-                        pgd.try_new_entry(virtual_mem::vpn0(virt_addr), virtual_mem::PMD_SHIFT);
-                    pmd[virtual_mem::vpn1(virt_addr)] = virtual_mem::PageTableEntry(0);
+                    let stack_top = curr_sig.sig_stack.take().unwrap();
+                    current_tcb()
+                        .vm_mapper
+                        .as_mut()
+                        .unwrap()
+                        .unmap(stack_top)
+                        .unwrap();
                 }
 
                 *regs = prev_regs;
@@ -224,14 +245,12 @@ impl InterruptTrait for Interrupt {
                     -1_isize as _
                 } else {
                     let live_proc_lock = schedule::get_live_proc().lock();
-                    let live_proc_map = live_proc_lock.get_mut();
+                    let mut live_proc_map = live_proc_lock;
 
                     match live_proc_map.get_mut(&target_pid) {
                         Some(t) => {
-                            let lock = t.lock();
-                            let proc = lock.get_mut();
+                            let mut proc = t.lock();
                             proc.sig.sig_mask |= 1 << target_sig;
-                            drop(lock);
                             0
                         }
                         None => -1_isize as _,
@@ -245,65 +264,36 @@ impl InterruptTrait for Interrupt {
                 let addr = regs.a0 as *const u8;
                 let length = crate::align(regs.a1, 0x1000);
                 let prop = ((regs.a2 & 0b1111) << 1) | PTE_U;
-                let flags = regs.a3;
+                let flags = MmapFlags::from_bits(regs.a3).unwrap();
 
-                let start_addr = if addr.is_null()
-                    || (virtual_mem::vpn2(addr as _)
-                        ..=virtual_mem::vpn2(addr as usize + length - 1))
-                        .any(|idx| tcb.pgd.as_ref().unwrap()[idx].is_valid())
-                    || (addr as usize) < tcb.mmap_start_addr
-                {
-                    let shift = virtual_mem::virt_shift_align(tcb.mmap_start_addr.trailing_zeros());
-                    let start_addr = crate::align(tcb.mmap_start_addr, 1 << shift);
-                    tcb.mmap_start_addr = start_addr + length;
-                    start_addr
+                let mapper = tcb.vm_mapper.as_mut().unwrap();
+                let start_addr = if addr.is_null() {
+                    mapper.map_addr(
+                        VirtualAddress(addr as usize),
+                        length,
+                        prop,
+                        vm_area::Provider::Anonymous,
+                    )
                 } else {
-                    addr as _
-                };
-
-                let mut curr_len = 0;
-                let mut curr_shift;
-                let root_pgd = tcb.pgd.as_mut().unwrap();
-
-                while curr_len < length {
-                    let curr_addr = start_addr + curr_len;
-
-                    let pte = match length - curr_len {
-                        ..PMD_SIZE => {
-                            curr_shift = PTE_SHIFT;
-                            let pmd = root_pgd.try_new_entry(vpn2(curr_addr), PMD_SHIFT);
-                            let pte = pmd.try_new_entry(vpn1(curr_addr), PTE_SHIFT);
-                            &mut pte[vpn0(curr_addr)]
-                        }
-                        PMD_SIZE..PGD_SIZE => {
-                            curr_shift = PMD_SHIFT;
-                            let pmd = root_pgd.try_new_entry(vpn2(curr_addr), PMD_SHIFT);
-                            &mut pmd[vpn1(curr_addr)]
-                        }
-                        PGD_SIZE.. => {
-                            curr_shift = PGD_SHIFT;
-                            &mut root_pgd[vpn2(curr_addr)]
-                        }
-                    };
-
-                    let end_size = curr_len + (1 << curr_shift);
-                    if flags & MmapFlags::MapAnonymous as usize != 0 {
-                        if flags & MmapFlags::MapPopulate as usize != 0 {
-                            let page = vec![0u8; 1 << curr_shift];
-                            let (ptr, _, _) = Vec::into_raw_parts(page);
-                            *pte = PageTableEntry::new(
-                                virt_to_phy(ptr as _),
-                                prop | PTE_V | PTE_A | PTE_D,
-                            );
-                        } else {
-                            pte.set_prop(prop | PTE_M);
-                        }
-                    }
-
-                    curr_len = end_size;
+                    mapper.map(length, prop, vm_area::Provider::Anonymous)
                 }
-                unsafe { asm!("sfence.vma") };
-                regs.a0 = start_addr;
+                .unwrap();
+
+                if flags.contains(MmapFlags::Populate) {
+                    for i in (start_addr.addr()..(start_addr.addr() + length)).step_by(0x1000) {
+                        let _ = mapper.map_to_phy(i.into());
+                    }
+                }
+
+                let serial = get_serial();
+                writeln!(
+                    serial,
+                    "mmap: expect at: {:#x} alloc at {:#x} size: {} prop: {:#b}, flags: {:#x}",
+                    addr as usize, start_addr, length, prop, flags
+                )
+                .unwrap();
+
+                regs.a0 = start_addr.addr();
             }
             SModeInterruptEnum::Open => {
                 let tcb = current_tcb();
@@ -459,7 +449,7 @@ impl InterruptTrait for Interrupt {
                 };
             }
             SModeInterruptEnum::IOctl => {
-                use virtual_mem::{phy_to_virt, vpn};
+                use virtual_mem::phy_to_virt;
                 let fd = regs.a0;
                 let req = regs.a1;
                 let ptr = regs.a2;
@@ -470,28 +460,26 @@ impl InterruptTrait for Interrupt {
                     return;
                 };
 
-                let mut curr_shift = virtual_mem::PGD_SHIFT;
-                let mut pte_ptr: *mut _ = &mut tcb.pgd.as_mut().unwrap()[vpn(ptr, curr_shift)];
-
-                while let Some(child_pte) = unsafe { &mut *pte_ptr }.to_leaf_ref() {
-                    curr_shift -= 9;
-                    pte_ptr = &mut child_pte[vpn(ptr, curr_shift)];
-                }
+                let curr_shift = virtual_mem::PTE_SHIFT;
+                let pte_ptr = tcb
+                    .vm_mapper
+                    .as_ref()
+                    .unwrap()
+                    .page_entry_ref(ptr.into())
+                    .unwrap();
 
                 let offset = ptr - (ptr & !((1 << curr_shift) - 1));
-                let kernel_ptr = phy_to_virt(unsafe { &*pte_ptr }.get_pa() + offset);
+                let kernel_ptr = phy_to_virt(pte_ptr.get_pa() + offset);
 
-                regs.a0 = match file.ioctl(req, kernel_ptr as _) {
+                regs.a0 = match file.ioctl(req, kernel_ptr.addr() as _) {
                     Ok(_) => {
                         let _sstatus = SetStatusSUM::new();
                         unsafe {
                             asm!(r#"
-                                 cbo.flush ({ker})
                                  cbo.inval ({usr})
                                  fence rw, rw
                                  fence.i
                                  "#,
-                             ker = in(reg) kernel_ptr,
                              usr = in(reg) ptr,
                             );
                         }
@@ -568,25 +556,15 @@ impl From<SModeInterruptEnum> for usize {
     }
 }
 
-enum MmapFlags {
-    MapAnonymous = 0x20,
-    MapPopulate = 0x8000,
-}
+bitflags! {
+    struct MmapFlags: usize {
+        const Anonymous = 0x20;
+        const Populate = 0x8000;
+    }
 
-enum MmapProp {
-    None = 0,
-    Read = 1,
-    Write = 2,
-    Exec = 4,
-}
-
-impl TryFrom<usize> for MmapFlags {
-    type Error = ();
-    fn try_from(value: usize) -> Result<Self, Self::Error> {
-        match value {
-            e if e == Self::MapAnonymous as _ => Ok(Self::MapAnonymous),
-            e if e == Self::MapPopulate as _ => Ok(Self::MapPopulate),
-            _ => Err(()),
-        }
+    struct MmapProp: usize {
+        const Read = 1;
+        const Write = 1 << 1;
+        const Exec = 1 << 2;
     }
 }

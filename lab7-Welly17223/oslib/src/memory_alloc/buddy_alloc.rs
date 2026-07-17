@@ -9,6 +9,7 @@ use log::{debug, info};
 use super::{MemoryLayout, MemoryRange, PAGE_MASK, startup_alloc};
 use crate::virtual_mem;
 
+#[allow(unused)]
 pub struct BuddyZone {
     pub allocators: &'static mut [PageAllocator],
     allocator_status_bit: u64,
@@ -60,6 +61,7 @@ fn pair_order(num: u32, order: u32) -> u32 {
     }
 }
 
+#[allow(unused)]
 impl BuddyZone {
     pub fn new(
         startup_alloc: &mut startup_alloc::StartupAllocator,
@@ -564,7 +566,7 @@ impl Page {
     }
 
     pub fn virt_addr(&self) -> usize {
-        virtual_mem::phy_to_virt(self.base_addr)
+        virtual_mem::phy_to_virt(virtual_mem::PhysicalAddress(self.base_addr)).addr()
     }
 
     pub fn new(index: usize, base_addr: usize) -> Self {
@@ -650,6 +652,7 @@ impl FreePageNode {
     }
 }
 
+#[allow(unused)]
 impl FreePageList {
     pub fn insert_from_ptr(&mut self, node: *const FreePageNode) {
         if node.is_null() || !node.is_aligned() {

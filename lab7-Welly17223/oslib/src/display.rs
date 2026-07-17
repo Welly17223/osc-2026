@@ -1,7 +1,6 @@
 use crate::{
     file_system::VfsError,
     interrupt,
-    once::Once,
     virtual_mem::{self},
 };
 use core::{arch::asm, cmp::min, ffi::c_uint, ptr};
@@ -9,12 +8,14 @@ use core::{arch::asm, cmp::min, ffi::c_uint, ptr};
 extern crate alloc;
 use alloc::sync::Arc;
 
+use spin::Once;
+
 // const FB_BASE: usize = 0x87000000;
 const FB_PHY_BASE: usize = 0x7f700000;
 const FB_WIDTH: usize = 1920;
 const FB_HEIGHT: usize = 1080;
 const FB_BPP: usize = 4;
-pub static FB_BASE: Once<usize> = crate::once::Once::new();
+pub static FB_BASE: Once<usize> = Once::new();
 
 const CACHE_BLOCK_SIZE: usize = 64;
 
@@ -27,8 +28,9 @@ pub struct DisplayBuffer {
     cache_block_size: usize,
 }
 
+#[derive(Debug)]
 #[repr(C)]
-struct FramBufferInfo {
+pub struct FramBufferInfo {
     width: c_uint,
     height: c_uint,
     bpp: c_uint,
@@ -110,9 +112,9 @@ impl crate::file_system::byte_device::ByteDevice for DisplayBuffer {
 }
 
 pub fn init_display() {
-    let virt_addr = virtual_mem::io_remap(FB_PHY_BASE, FB_WIDTH * FB_HEIGHT * FB_BPP);
-    let _ = DISPLAY.set(DisplayBuffer {
-        base: virt_addr,
+    let virt_addr = virtual_mem::io_remap(FB_PHY_BASE.into(), FB_WIDTH * FB_HEIGHT * FB_BPP);
+    DISPLAY.call_once(|| DisplayBuffer {
+        base: virt_addr.addr(),
         width: FB_WIDTH,
         height: FB_HEIGHT,
         bpp: FB_BPP,

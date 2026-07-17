@@ -33,14 +33,6 @@ impl<T> Once<T> {
             Err(_) => self.get().unwrap(),
         }
     }
-
-    pub fn set(&self, value: T) -> Result<(), T> {
-        self.data.set(value)
-    }
-
-    pub fn get_mut(&mut self) -> Option<&mut T> {
-        self.data.get_mut()
-    }
 }
 
 impl<T> Default for Once<T> {

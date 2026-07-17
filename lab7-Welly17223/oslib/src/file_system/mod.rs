@@ -10,9 +10,9 @@ use alloc::{
     vec::Vec,
 };
 
-use crate::{display, once::Once, schedule, uart};
+use crate::{display, schedule, uart};
 
-use spin::rwlock::RwLock;
+use spin::{Once, RwLock};
 
 pub mod byte_device;
 pub mod file_describtor_table;
@@ -209,20 +209,6 @@ impl SeekFrom {
     }
 }
 
-enum Path<'a> {
-    Child(&'a str),
-    Parent,
-    Current,
-}
-
-fn parse_single_path<'a>(path: &'a str) -> Path<'a> {
-    match path {
-        ".." => Path::Parent,
-        "." => Path::Current,
-        s => Path::Child(s),
-    }
-}
-
 pub struct Vfs {
     rootfs: RwLock<Option<Arc<Mount>>>,
     filesystems: RwLock<BTreeMap<String, Arc<dyn FileSystem>>>,
@@ -250,7 +236,7 @@ impl Vfs {
 
         let root_node = root
             .root
-            .get_or_init(|| root.fs.setup_mount(Weak::default()).unwrap())
+            .call_once(|| root.fs.setup_mount(Weak::default()).unwrap())
             .clone();
 
         if pathname == "/" {
@@ -276,7 +262,7 @@ impl Vfs {
                 _ => {
                     let mount = current_node.mount.read();
                     let temp = if let Some(child) = mount.as_ref() {
-                        child.root.get_or_init(|| {
+                        child.root.call_once(|| {
                             child
                                 .fs
                                 .setup_mount(child.parent.get().unwrap().clone())
@@ -303,7 +289,7 @@ impl Vfs {
             let parent = current_node.parent.read().clone();
             current_node = mount
                 .root
-                .get_or_init(|| mount.fs.setup_mount(parent).unwrap())
+                .call_once(|| mount.fs.setup_mount(parent).unwrap())
                 .clone();
         }
 
@@ -339,7 +325,7 @@ impl Vfs {
 
             let root_node = root
                 .root
-                .get_or_init(|| root.fs.setup_mount(Weak::default()).unwrap())
+                .call_once(|| root.fs.setup_mount(Weak::default()).unwrap())
                 .clone();
 
             let mut current_node = if pathname.starts_with("/") {
@@ -361,7 +347,7 @@ impl Vfs {
                     _ => {
                         let mount = current_node.mount.read();
                         let temp = if let Some(child) = mount.as_ref() {
-                            child.root.get_or_init(|| {
+                            child.root.call_once(|| {
                                 child
                                     .fs
                                     .setup_mount(child.parent.get().unwrap().clone())
@@ -445,7 +431,7 @@ impl Vfs {
             parent: Once::new(),
             fs,
         };
-        let _ = set_up.parent.set(node_parent.clone());
+        let _ = set_up.parent.call_once(|| node_parent.clone());
 
         *mount = Some(set_up);
         Ok(())
@@ -494,7 +480,7 @@ impl From<&str> for OpenFlags {
 }
 
 pub fn init_vfs() {
-    let vfs = ROOT.get_or_init(Vfs::new);
+    let vfs = ROOT.call_once(Vfs::new);
 
     let tempfs = tempfs::Tmpfs::default();
     vfs.register_filesystem(Arc::new(tempfs)).unwrap();

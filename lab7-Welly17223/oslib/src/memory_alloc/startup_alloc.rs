@@ -34,8 +34,7 @@ impl StartupAllocator {
         while self.reserved_memory_idx < self.reserved_memory.len()
             && self.reserved_memory[self.reserved_memory_idx].overlap(&alloc_range)
         {
-            alloc_range.base =
-                crate::align(self.reserved_memory[self.reserved_memory_idx].end(), align);
+            alloc_range.base = crate::align(self.reserved_memory[self.reserved_memory_idx].end(), align);
             self.reserved_memory_idx += 1;
         }
         self.off = alloc_range.end() - self.base;

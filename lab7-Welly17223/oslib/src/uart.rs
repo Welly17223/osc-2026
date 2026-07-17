@@ -2,8 +2,10 @@
 
 extern crate alloc;
 
+use spin::Once;
+
 use crate::{
-    file_system::{Vfs, VfsError, byte_device},
+    file_system::{VfsError, byte_device},
     interrupt::{self, SModeInterrupt, SetStatusSUM, plic},
     schedule::{current_state, get_process_ready_queue_mut, schedule},
     thread::{self, State, ThreadQueue},
@@ -52,18 +54,20 @@ impl From<Offset> for usize {
 }
 
 pub static mut SERIAL: Option<Uart> = None;
-pub static mut RX_THREAD_QUEUE: Option<thread::WaitQueue> = None;
-pub static mut TX_THREAD_QUEUE: Option<thread::WaitQueue> = None;
+pub static mut RX_THREAD_QUEUE: Once<thread::WaitQueue> = Once::new();
+pub static mut TX_THREAD_QUEUE: Once<thread::WaitQueue> = Once::new();
 
 fn get_rx_thread_queue() -> &'static mut thread::WaitQueue {
-    match unsafe { &mut *(&raw mut RX_THREAD_QUEUE) } {
+    let ptr = &raw mut RX_THREAD_QUEUE;
+    match unsafe { &mut *ptr }.get_mut() {
         Some(t) => t,
         None => panic!("Not initialize"),
     }
 }
 
 fn get_tx_thread_queue() -> &'static mut thread::WaitQueue {
-    match unsafe { &mut *(&raw mut TX_THREAD_QUEUE) } {
+    let ptr = &raw mut TX_THREAD_QUEUE;
+    match unsafe { &mut *ptr }.get_mut() {
         Some(t) => t,
         None => panic!("Not initialize"),
     }
@@ -153,11 +157,11 @@ pub fn init_serial(dtb_addr: *const u8) {
         Ok((ptr, _len)) => unsafe { *(ptr as *const u32) }.swap_bytes(),
         Err(_) => todo!(),
     };
-    let uart_virt_base = virtual_mem::io_remap(uart_base, 4096);
+    let uart_virt_base = virtual_mem::io_remap(uart_base.into(), 4096);
     let def_uart = match uart_compatible {
         // Qemu
         s if s.contains("ns16550a") || s.contains("pxa-uart") => {
-            Uart::new(uart_virt_base, uart_shift)
+            Uart::new(uart_virt_base.addr(), uart_shift)
         }
         _ => unimplemented!(),
     };
@@ -167,10 +171,12 @@ pub fn init_serial(dtb_addr: *const u8) {
     };
     let _ = table.insert(uart_irq, crate::interrupt::plic::IRQ::UART);
 
+    let rx_thread_queue_ptr = &raw mut RX_THREAD_QUEUE;
+    let tx_thread_queue_ptr = &raw mut TX_THREAD_QUEUE;
     unsafe {
         SERIAL = Some(def_uart);
-        RX_THREAD_QUEUE = Some(thread::WaitQueue::default());
-        TX_THREAD_QUEUE = Some(thread::WaitQueue::default());
+        (&*rx_thread_queue_ptr).call_once(thread::WaitQueue::default);
+        (&*tx_thread_queue_ptr).call_once(thread::WaitQueue::default);
     }
 }
 
@@ -191,14 +197,14 @@ impl Default for RingBuf {
 impl RingBuf {
     fn push_ch<T: Into<u8>>(&mut self, ch: T) {
         let ch = ch.into();
-        if self.size.load(Ordering::SeqCst) < self.output_queue.len() {
+        if self.size.load(Ordering::Relaxed) < self.output_queue.len() {
             let tail = self.tail.load(Ordering::Relaxed);
             self.output_queue[tail] = ch;
             self.tail.store(
                 (tail + 1) & (self.output_queue.len() - 1),
                 Ordering::Relaxed,
             );
-            self.size.fetch_add(1, Ordering::SeqCst);
+            self.size.fetch_add(1, Ordering::Relaxed);
         }
     }
 
@@ -210,7 +216,7 @@ impl RingBuf {
                 (head + 1) & (self.output_queue.len() - 1),
                 Ordering::Relaxed,
             );
-            self.size.fetch_sub(1, Ordering::SeqCst);
+            self.size.fetch_sub(1, Ordering::Relaxed);
             Some(ch)
         } else {
             None
@@ -218,11 +224,11 @@ impl RingBuf {
     }
 
     fn is_empty(&self) -> bool {
-        self.size.load(Ordering::SeqCst) == 0
+        self.size.load(Ordering::Relaxed) == 0
     }
 
     fn is_full(&self) -> bool {
-        self.size.load(Ordering::SeqCst) >= self.output_queue.len()
+        self.size.load(Ordering::Relaxed) >= self.output_queue.len()
     }
 
     fn new() -> Self {
@@ -369,6 +375,7 @@ impl Uart {
     }
 
     pub fn push_tx<T: AsRef<[u8]>>(&mut self, s: T) {
+        let _disable_interrupt = SModeInterrupt::new();
         let _sstatus_sum = SetStatusSUM::new();
         unsafe {
             let mut ier = self.ier().read_volatile();
@@ -394,6 +401,9 @@ impl Uart {
         let Some(txq) = &mut self.tx_queue else {
             return;
         };
+        if s == b'\n' {
+            txq.push_ch(b'\r');
+        }
         while txq.is_full() {
             if current_state() == State::Running {
                 get_tx_thread_queue().push_current();
@@ -417,12 +427,11 @@ impl Uart {
         let res = txq.pop();
 
         if let Some(entry_arc) = get_tx_thread_queue().pop() {
-            let entry_lock = entry_arc.lock();
-            let entry = entry_lock.get_mut();
+            let mut entry = entry_arc.lock();
             if entry.state == State::Waiting {
                 entry.state = State::Ready;
             }
-            drop(entry_lock);
+            drop(entry);
 
             get_process_ready_queue_mut().push_back(entry_arc);
         } else if txq.is_empty() {
@@ -439,13 +448,12 @@ impl Uart {
         rxq.push_ch(c);
 
         if let Some(entry_arc) = get_rx_thread_queue().pop() {
-            let entry_lock = entry_arc.lock();
-            let entry = entry_lock.get_mut();
+            let mut entry = entry_arc.lock();
             if entry.state == State::Waiting {
                 entry.state = State::Ready;
             }
 
-            drop(entry_lock);
+            drop(entry);
             get_process_ready_queue_mut().push_back(entry_arc);
         }
     }
