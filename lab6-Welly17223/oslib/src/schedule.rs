@@ -12,11 +12,15 @@ use core::{
 };
 
 use crate::{
-    interrupt::{self, timer::{self, Time}},
+    interrupt::{
+        self,
+        timer::{self, Time},
+    },
     kernel_shell,
     spinlock::SpinLock,
-    thread::{self, Context, State, TextArea, ThreadControlTable, alloc_pid},
-    uart, virtual_mem,
+    thread::{self, Context, State, ThreadControlTable, alloc_pid},
+    uart,
+    virtual_mem::{self, VirtualAddress},
 };
 
 pub type SafeSendTCB = Arc<SpinLock<ThreadControlTable>>;
@@ -154,12 +158,12 @@ pub fn init() {
             ra: 0,
             sp: 0,
             s: [0; 12],
-            satp: virtual_mem::make_satp(virtual_mem::virt_to_phy(
-                { &raw const virtual_mem::PGD } as _
-            )),
+            satp: virtual_mem::make_satp(
+                VirtualAddress({ &raw const virtual_mem::PGD } as _).into_phy(),
+            ),
         },
         state: State::Running,
-        pgd: None,
+        vm_mapper: None,
         pid: boot_pid,
         exit_code: 0,
         kernel_stack: Box::new([0; 1]),
@@ -167,12 +171,10 @@ pub fn init() {
         term_children: Box::new(BTreeMap::new()),
         parent: None,
         ppid: 1,
-        user_init_sp: 0,
-        mmap_start_addr: 0,
+        user_init_sp: 0usize.into(),
         awake_time: 0,
         reschedule: false,
         sig: Box::new(thread::SigAct::default()),
-        text: TextArea::default(),
     }));
 
     let boot_tcb_ptr = boot_idle_thread.as_ref().lock().get() as *const _ as usize;

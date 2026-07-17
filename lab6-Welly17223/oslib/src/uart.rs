@@ -6,7 +6,7 @@ use crate::{
     interrupt::{self, SModeInterrupt, SetStatusSUM, plic},
     schedule::{current_state, get_process_ready_queue_mut, schedule},
     thread::{self, State, ThreadQueue},
-    virtual_mem::{self, phy_to_virt},
+    virtual_mem,
 };
 use core::{
     fmt::Write,
@@ -152,11 +152,11 @@ pub fn init_serial(dtb_addr: *const u8) {
         Ok((ptr, _len)) => unsafe { *(ptr as *const u32) }.swap_bytes(),
         Err(_) => todo!(),
     };
-    let uart_virt_base = virtual_mem::io_remap(uart_base, 4096);
+    let uart_virt_base = virtual_mem::io_remap(uart_base.into(), 4096);
     let def_uart = match uart_compatible {
         // Qemu
         s if s.contains("ns16550a") || s.contains("pxa-uart") => {
-            Uart::new(uart_virt_base, uart_shift)
+            Uart::new(uart_virt_base.addr(), uart_shift)
         }
         _ => unimplemented!(),
     };

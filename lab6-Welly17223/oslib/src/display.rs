@@ -1,7 +1,7 @@
 use crate::{
     interrupt,
     once::Once,
-    virtual_mem::{self, phy_to_virt},
+    virtual_mem::{self, VirtualAddress, phy_to_virt},
 };
 use core::{arch::asm, cell::OnceCell, ptr};
 
@@ -11,7 +11,7 @@ const FB_WIDTH: usize = 1920;
 const FB_HEIGHT: usize = 1080;
 const FB_BPP: usize = 4;
 const XRGB8888: usize = 875713112;
-pub static FB_BASE: Once<usize> = crate::once::Once::new();
+pub static FB_BASE: Once<VirtualAddress> = crate::once::Once::new();
 
 struct RAMFBCfg {
     addr: u64,
@@ -44,9 +44,9 @@ fn flush_dcache(addr: *mut u32, len: usize) {
 }
 
 pub fn video_bmp_display(bmp_image: *mut u32, width: usize, height: usize) {
-    let fb = *FB_BASE
-        .get_or_init(|| virtual_mem::io_remap(FB_PHY_BASE, FB_WIDTH * FB_HEIGHT * FB_BPP))
-        as *mut u32;
+    let fb = FB_BASE
+        .get_or_init(|| virtual_mem::io_remap(FB_PHY_BASE.into(), FB_WIDTH * FB_HEIGHT * FB_BPP))
+        .addr() as *mut u32;
     let start_x = (FB_WIDTH - width) / 2;
     let start_y = (FB_HEIGHT - height) / 2;
     for y in 0..height {

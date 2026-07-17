@@ -64,9 +64,9 @@ pub enum PageState {
 ```
 
 在初始化階段，給每一個 memory block 建立一個 memory allocator 。在此先計算需要多少的 page frame ：
-$$
-    \text{N}_\text{page frame} = \frac{\text{size}_\text{memory\_block}}{\text{size}_\text{page}}
-$$
+```math
+\text{N}_\text{page frame} = \frac{\text{size}_\text{memory\_block}}{\text{size}_\text{page}}
+```
 然後初始化 page frame：
 ```rust
 for i in pages.iter_mut() {
@@ -88,9 +88,9 @@ for i in pages.iter_mut() {
 > - 有些指標寫入操作使用 `unsafe { *ptr } = value` 這樣的形式，結合 [lab 2 筆記的補充說明](/lab2-Welly17223/README.md#補記-rust-指標操作與全域變數)是無法做寫入的，應該改成 `unsafe { &mut *ptr } = value` 。也是在 Lab 6 修復。
 
 補充找出 pages 的 pair 的算式：
-$$
+```math
 \text{index}_{pair} = \text{index}_{current} \oplus  (2 ^ {order} )
-$$
+```
 
 ### Dynamic Memory Allocator
 
